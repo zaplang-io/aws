@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Fast, deterministic, toolchain-free gate: an independent SigV4 oracle
+  # recomputes the pinned fixtures and the bundler is smoke-tested. This runs on
+  # every PR and needs only Python.
+  offline-vectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify SigV4 fixtures against independent oracle
+        run: python3 tools/verify_vectors.py
+      - name: Bundler smoke test
+        run: |
+          python3 tools/bundle.py src/aws/core.zap src/aws/dynamodb.zap \
+            src/aws/s3.zap tests/service_signing.main.zap > /tmp/bundle.zap
+          test -s /tmp/bundle.zap
+          echo "bundle lines: $(wc -l < /tmp/bundle.zap)"
+
+  # Authoritative runtime check: build the Zap toolchain from zaplang-io/zap and
+  # run the offline suite through it, proving aws.core actually PRODUCES the
+  # signed bytes (not just that the fixtures are correct). Heavier (LLVM build),
+  # so it runs on pushes to main and on-demand, not on every PR.
+  # NOTE (v1): a pinned build-matrix (OS x collector) is a follow-up; this single
+  # linux/LLVM-18 build is the thin-vertical gate.
+  zap-toolchain:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout aws SDK
+        uses: actions/checkout@v4
+        with:
+          path: aws
+      - name: Checkout zaplang-io/zap toolchain
+        uses: actions/checkout@v4
+        with:
+          repository: zaplang-io/zap
+          path: zap
+      - name: Install LLVM 18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18 llvm-18-dev clang-18 libssl-dev zlib1g-dev
+          echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> "$GITHUB_ENV"
+      - name: Build zap (with codegen)
+        working-directory: zap
+        run: cargo build -p zapc --features llvm --bin zap
+      - name: Run offline test suite through the toolchain
+        working-directory: aws
+        env:
+          ZAP: ${{ github.workspace }}/zap/target/debug/zap
+        run: bash tools/run-tests.sh

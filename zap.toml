@@ -1,0 +1,23 @@
+# Zap project manifest (zap.toml). TOML, Cargo-style (D-0052).
+#
+# The official Zap AWS SDK (D-0011). Distributed in the official-packages tier
+# (D-0056): developed under zaplang-io, installed/managed by the Zap package
+# manager (I#69) — NOT a bundled stdlib module.
+#
+# This is the v1 HAND-WRITTEN THIN VERTICAL: a shared SigV4/credentials/transport
+# core plus hand-written S3 and DynamoDB clients, to make Zap runnable against
+# real AWS and to surface language/stdlib gaps (see FRICTION.md). The full SDK is
+# build-time codegen from botocore models (D-0011 §1) — a later phase.
+#
+# Per D-0011 §8 the shipped shape is one `aws-core` package + per-service
+# packages (`aws-s3`, `aws-dynamodb`, ...). That split needs Zap-to-Zap package
+# imports, which the compiler does not consume yet (FRICTION.md #1); until then
+# the modules live together under src/aws/ and are stitched by tools/bundle.py.
+[package]
+name = "aws"
+version = "0.1.0"
+
+[dependencies]
+# None yet. The SDK uses only stdlib modules (crypto, os, tls, net, json,
+# datetime). When per-service packages split out, `aws-s3` / `aws-dynamodb` will
+# depend on `aws-core` here.
