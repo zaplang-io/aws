@@ -48,7 +48,7 @@ examples/*.main.zap            runnable live-AWS examples
 tools/bundle.py                stitch modules + a main() into one compilable file
 tools/zrun.sh                  bundle + run with the Zap toolchain
 tools/run-tests.sh             run the offline suite, diff vs expected
-tools/verify_vectors.py        independent SigV4 oracle (toolchain-free CI gate)
+tools/verify_vectors.py        independent SigV4 oracle (toolchain-free CI cross-check)
 ```
 
 The core and per-service modules are kept cleanly separated so the codegen
