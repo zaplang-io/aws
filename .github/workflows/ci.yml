@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Real build + offline tests through the prebuilt Zap toolchain image
+  # (ghcr.io/zaplang-io/zap), so CI is fast and reproducible without building the
+  # compiler from source. The image is run via `docker run` rather than a job
+  # `container:` because it ships no Node.js, which GitHub's `container:` jobs
+  # need for actions/checkout; `docker run` sidesteps that and still runs the
+  # real `zap`.
+  zap-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline suite in the prebuilt Zap toolchain image
+        run: |
+          docker run --rm -v "$PWD":/w -w /w \
+            ghcr.io/zaplang-io/zap:latest bash -lc '
+              set -euo pipefail
+              echo "zap: $(zap --version)"
+              # Independent SigV4 oracle re-derives the pinned fixtures (no toolchain).
+              python3 tools/verify_vectors.py
+              # Real compile + run: proves aws.core PRODUCES the signed bytes.
+              bash tools/run-tests.sh
+              # Compile-smoke the service modules + examples (guards on missing env).
+              bash tools/zrun.sh src/aws/core.zap src/aws/dynamodb.zap \
+                examples/dynamodb_get_item.main.zap
+              bash tools/zrun.sh src/aws/core.zap src/aws/s3.zap \
+                examples/s3_list_objects.main.zap
+            '

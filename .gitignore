@@ -1,0 +1,15 @@
+# Zap build artifacts
+/target/
+/target-docker/
+zenv/
+*.o
+*.ll
+a.out
+
+# Bundler output
+/build/
+*.bundle.zap
+
+# OS / editor
+.DS_Store
+*.swp

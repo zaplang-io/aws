@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Bundle Zap AWS SDK modules into a single compilable file.
+
+The Zap compiler does not yet consume Zap-to-Zap package imports — a project
+compiles exactly one entry file (`src/main.zap`), and `import` resolves only
+stdlib modules and `import python` (see FRICTION.md, gap #1). Until that lands,
+a runnable program = the library modules + one `main()` concatenated into a
+single file.
+
+This script concatenates its input files in order, hoisting every `import <mod>`
+line to the top (de-duplicated, first-seen order) so the stitched file has each
+stdlib import exactly once. It is a build step, not part of the shipped library.
+
+Usage:
+    tools/bundle.py src/aws/core.zap src/aws/dynamodb.zap tests/foo.main.zap > out.zap
+"""
+import re
+import sys
+
+IMPORT_RE = re.compile(r"^import\s+\S+\s*$")
+
+
+def main(argv):
+    if len(argv) < 2:
+        sys.stderr.write(__doc__)
+        return 2
+    imports = []
+    seen = set()
+    bodies = []
+    for path in argv[1:]:
+        with open(path, "r") as fh:
+            body_lines = []
+            for line in fh.read().splitlines():
+                if IMPORT_RE.match(line):
+                    key = line.strip()
+                    if key not in seen:
+                        seen.add(key)
+                        imports.append(key)
+                    continue
+                body_lines.append(line)
+            bodies.append((path, "\n".join(body_lines)))
+
+    out = []
+    out.extend(imports)
+    out.append("")
+    for path, body in bodies:
+        out.append(f"# ===== bundled from {path} =====")
+        out.append(body.strip("\n"))
+        out.append("")
+    sys.stdout.write("\n".join(out) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
