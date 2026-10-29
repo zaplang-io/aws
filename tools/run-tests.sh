@@ -42,6 +42,10 @@ run_case retry \
 run_case endpoints_resolution \
     src/aws/core.zap src/aws/endpoints.zap tests/endpoints_resolution.main.zap
 
+run_case credentials_chain \
+    src/aws/core.zap src/aws/endpoints.zap src/aws/credentials.zap \
+    tests/credentials_chain.main.zap
+
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2
     exit 1

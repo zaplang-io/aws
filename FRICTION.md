@@ -76,6 +76,41 @@ pre-normalized workarounds documented below are gone. What unblocked what:
   SigV4 core (its hex outputs come from the hex-returning `crypto` functions),
   but available for binary payloads (DynamoDB `B` attributes, etc.).
 
+## Credential provider chain (zaplang-io/aws#341)
+
+`src/aws/credentials.zap` is the full boto3-style chain on top of the Phase 0
+stdlib. Everything it needs was expressible with no new language friction:
+
+- **What worked.** `os.getenv/hasenv/setenv` + `fs.exists/read_file` cover the
+  env and shared-INI providers; `http.request(method,url,body,headers)` /
+  `http.get(url,headers)` (zaplang-io/zap#280) drive the IMDSv2 PUT-token /
+  GET-creds handshake and the ECS/EKS container endpoint; `process.run(argv) ->
+  (code,out,err)` (tuple-destructured) runs a `credential_process`; and
+  `datetime.strptime(exp, "%Y-%m-%dT%H:%M:%SZ")` + `to_timestamp` (#338) give the
+  expiry math the cache needs. Nested structs (a cache holding a record), lists
+  of structs (`first_ok`), and recursion (`source_profile`) all codegen cleanly.
+  The metadata/container/process JSON is read with the same best-effort
+  `aws.core.json_string_field` the error path uses — a full JSON parser (D-0011
+  §4) is not required for these flat, server-produced objects.
+- **`chr(n)` returns `char`, not `str`.** `ini_sep()` had to wrap it as
+  `str(chr(31))` to satisfy a `-> str` return; a bare `chr(31)` is a `char`
+  return-type mismatch. Minor, consistent with the codepoint/char model (#284).
+
+### Two design decisions flagged for review
+
+- **source_profile without STS.** A profile with `role_arn` + `source_profile`
+  resolves the *source* profile's base credentials, but the STS `AssumeRole`
+  call that would exchange them for the role's temporary creds is **deferred** —
+  the SDK has no STS client yet. Documented at the call site; the chain still
+  yields usable base credentials rather than failing.
+- **Container provider BEFORE IMDS.** The ticket lists IMDS (3) ahead of the
+  container endpoint (4); the implementation keeps botocore's order (container
+  first) on purpose. An ECS task runs *on* an EC2 instance whose IMDS is
+  reachable, so trying IMDS first would hand back the instance role instead of
+  the task role. `credential_process` and `source_profile` (ticket items 5 and
+  part of 2) are profile-driven, so they resolve inside the shared-config
+  provider rather than as standalone chain steps.
+
 ### Still-open friction found during this work
 
 - **No keyword-only marker.** A bare `*` separator in a parameter list

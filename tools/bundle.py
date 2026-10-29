@@ -11,8 +11,14 @@ This script concatenates its input files in order, hoisting every `import <mod>`
 line to the top (de-duplicated, first-seen order) so the stitched file has each
 stdlib import exactly once. It is a build step, not part of the shipped library.
 
+The file list is supplied on the command line (library modules first, the
+`main()` last); there is no hard-coded manifest. The current modules are
+`src/aws/core.zap`, `src/aws/credentials.zap`, `src/aws/dynamodb.zap` and
+`src/aws/s3.zap`; the test/example harnesses in tools/ pass the subset each entry
+point needs.
+
 Usage:
-    tools/bundle.py src/aws/core.zap src/aws/dynamodb.zap tests/foo.main.zap > out.zap
+    tools/bundle.py src/aws/core.zap src/aws/credentials.zap tests/foo.main.zap > out.zap
 """
 import re
 import sys
