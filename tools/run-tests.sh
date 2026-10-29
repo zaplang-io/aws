@@ -53,6 +53,10 @@ run_case restjson_binding \
     src/aws/core.zap src/aws/endpoints.zap src/aws/binding.zap src/aws/restjson.zap \
     tests/restjson_binding.main.zap
 
+run_case restxml_codec \
+    src/aws/core.zap src/aws/endpoints.zap src/aws/binding.zap src/aws/restxml.zap \
+    tests/restxml_codec.main.zap
+
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2
     exit 1
