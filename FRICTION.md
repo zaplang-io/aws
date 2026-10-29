@@ -49,18 +49,38 @@ what unblocked it.
   safe probing.
 - **Module imports (#1) — LANDED but not yet adopted here**, see below.
 
-### New friction found during this rewrite
+## Resolved in Phase 1 (aws-core runtime)
 
-- **`and` / `or` do NOT short-circuit.** Both operands are always evaluated, so
-  a bounds check cannot guard an index in the same expression
-  (`while j >= 0 and key < out[j]` faults with `index -1` when `j < 0`). The
-  insertion sort in `aws.core.sorted_strings` is written around this. This is a
-  surprising, easy-to-miss correctness trap; worth a language decision.
+Phase 0 landed the last of the string/number/time surface the signer needed, so
+the aws-core rewrite (zaplang-io/zap#340) is the *real* SigV4 algorithm — the
+pre-normalized workarounds documented below are gone. What unblocked what:
+
+- **Percent-encoding (was the last piece of #2) — RESOLVED** by the `url` module
+  (zaplang-io/zap#335). `aws.core.canonical_uri` is `url.quote_path(path)`,
+  double-encoded for every non-S3 service (AWS's rule); `aws.core.canonical_query`
+  is `url.canonical_query(dict)` (each key/value RFC-3986-encoded, pairs sorted).
+  Reserved characters in a path segment or query value — e.g. a `/` in an S3
+  `prefix` — are now encoded (`%2F`) exactly as botocore does. This removed the
+  v1 "URIs/query keys must already be URI-safe" caveat.
+- **`datetime` SigV4 timestamp (was #4) — RESOLVED** by zaplang-io/zap#286/#338.
+  `datetime.strftime(now(), "%Y%m%dT%H%M%SZ")` / `"%Y%m%d"` build the `x-amz-date`
+  and scope date, so `aws.core.sign_request_now` can stamp a live request itself.
+  The caller-supplied `ZAP_AWS_AMZ_DATE` / `ZAP_AWS_DATE_STAMP` env vars are gone.
+- **`and` / `or` short-circuit — RESOLVED** by zaplang-io/zap#367. The v1
+  insertion sort was written around the old eager evaluation; with real
+  short-circuiting (and `list.sort`, below) it is deleted.
+- **`list.sort` / `sorted` — RESOLVED** by zaplang-io/zap#336. `aws.core`'s
+  hand-rolled `sorted_strings` insertion sort is replaced by the `sorted`
+  builtin for canonical header/attribute ordering.
+- **`bytes` / `base64` / `hex` — LANDED** (zaplang-io/zap#337). Not needed by the
+  SigV4 core (its hex outputs come from the hex-returning `crypto` functions),
+  but available for binary payloads (DynamoDB `B` attributes, etc.).
+
+### Still-open friction found during this work
+
 - **No keyword-only marker.** A bare `*` separator in a parameter list
   (`def f(a, *, b=1)`) does not parse; optional params are just trailing
   defaulted positionals. Put all optional/keyword params last.
-- **`list` has no `.sort()`** (only `append` + index + `len` + iterate), hence
-  the hand-rolled sort for canonical ordering.
 - **`dict.get` needs an annotated sink.** `Optional[str] v = d.get(k)` works;
   the inline `d.get(k).unwrap_or(...)` fails to resolve `Optional[V]` in mono
   (documented in zaplang-io/zap#281).
@@ -99,11 +119,14 @@ runnable program, as before.
 **Issue:** zaplang-io/zap#283 (follow-up: adopt `import` + the entry-dir-rooting
 / `zap test` resolution notes above)
 
-## 2. Strings are opaque at run time  — RESOLVED (zaplang-io/zap#284/#285)
+## 2. Strings are opaque at run time  — RESOLVED (zaplang-io/zap#284/#285/#335)
 
-*Historical.* This was the single biggest v1 constraint; it is now fixed and
-this rewrite relies on the full string surface (see "Resolved since v1" above).
-The original write-up is kept for the record.
+*Historical.* This was the single biggest v1 constraint; it is now fully fixed.
+The ergonomic rewrite relied on indexing/slicing/case/compare (#284/#285), and
+Phase 1 added the last missing piece — per-character **percent-encoding** — via
+the `url` module (#335), so SigV4 canonicalization of the URI and query is now
+generic (see "Resolved in Phase 1" above). The original write-up is kept for the
+record.
 
 At run time a `str` supports only `+`, `len`, and being passed to builtins
 (`print`, `crypto`). Everything else is unavailable:
@@ -156,54 +179,60 @@ hard-coded in examples. Ugly and error-prone, but honest.
 
 **Issue:** zaplang-io/zap#285 (and zaplang-io/zap#282 for the string<->int API)
 
-## 4. `datetime` cannot produce a SigV4 timestamp  — blocks "sign now"
+## 4. `datetime` cannot produce a SigV4 timestamp  — RESOLVED (zaplang-io/zap#286/#338)
 
-`datetime.format(now())` returns ISO-8601 only (`2026-10-28T05:46:21`, no `Z`,
-no millis). SigV4 needs the **basic** format `YYYYMMDDTHHMMSSZ` and the scope
-date `YYYYMMDD`. There is no `strftime`/custom format, and (per #2) the ISO
-string cannot be reshaped (no removing `-`/`:`, no slicing).
+*Historical.* v1's `datetime.format(now())` returned ISO-8601 only
+(`2026-10-28T05:46:21`, no `Z`), and (per #2) the string could not be reshaped,
+so the SDK could not stamp the current time into a request and read `X-Amz-Date`
+/ the scope date from env vars the caller set with `date -u`.
 
-**Impact:** the SDK cannot stamp the current time into a request, so it cannot
-sign a live request on its own.
+**Resolved:** `datetime.strftime` (#286) + `strptime` (#338) land the full
+directive set. `aws.core.signing_time_now()` is
+`strftime(now(), "%Y%m%dT%H%M%SZ")` / `"%Y%m%d"`, and `sign_request_now` signs a
+live request with no caller-supplied timestamp. The `ZAP_AWS_*` date env vars
+are gone from the examples.
 
-**Workaround:** `X-Amz-Date` and the scope date are read from env vars the caller
-sets with `date -u +%Y%m%dT%H%M%SZ` / `+%Y%m%d`.
+**Issue:** zaplang-io/zap#286, zaplang-io/zap#338
 
-**Issue:** zaplang-io/zap#286
+## 5. HTTP client request/response headers  — PARTIALLY RESOLVED (zaplang-io/zap#280/#279)
 
-## 5. HTTP client cannot set request headers  — forces raw HTTP over TLS
+v1's `http.get/post/request` took no headers argument, so the signed AWS headers
+(`Authorization`, `X-Amz-*`, `Content-Type`, ...) could not be set on the way
+out, forcing a hand-built HTTP/1.1 request over raw `tls`.
 
-`http.get(url)` / `http.post(url, body)` / `http.request(method, url, body)` take
-no headers argument, and the response accessors only fetch a named header after
-the fact. A signed AWS request needs `Authorization`, `X-Amz-Date`,
-`X-Amz-Content-Sha256`, `X-Amz-Target`, `Content-Type`, `X-Amz-Security-Token`,
-etc. on the way out.
+**Resolved (the blocker):** outbound request headers (#280) and response-header
+access (#279) have landed, so the stdlib `http` client is no longer a hard
+blocker for authenticated APIs.
 
-**Impact:** the stdlib `http` client is unusable for any authenticated API.
+**Still hand-built, by choice:** `aws.core` keeps its own `tls`-based transport
+(`send_https` + `parse_response`). SigV4 signs an exact byte sequence, and the
+transport controls connection framing (`Connection: close`, read-to-EOF) and
+returns a parsed `Response { status, headers, body }` that error dispatch and
+retry classification ride on. Migrating to the `http` client is a candidate
+follow-up once it exposes equivalent control; the `tls` path is not a workaround
+for a missing feature any more.
 
-**Workaround:** build the full HTTP/1.1 request text by hand (request line +
-headers + body) and send it over `tls.connect` / `tls.send` / `tls.recv`
-(`core.send_https`). Response parsing (splitting status/headers/body) then also
-needs the string ops from #2, so v1 returns the raw response text.
-
-**Issue:** zaplang-io/zap#280 (already open)
+**Issue:** zaplang-io/zap#280, zaplang-io/zap#279 (both landed)
 
 ## Minor papercuts
 
 - **`scope` is a reserved keyword** (structured concurrency), so it can't name a
   SigV4 `credential_scope` variable — a surprising collision for AWS code.
   Renamed to `cred_scope`. (No issue filed; noting for awareness.)
-- **No `bytes → hex` builtin** (already noted in the `crypto_hmac_raw` golden).
-  Not blocking here — SigV4's hex outputs come from the hex-returning `crypto`
-  functions — but a `bytes`-handling SDK (e.g. binary DynamoDB `B` attributes)
-  will want it.
+- **No `bytes → hex` builtin — RESOLVED** (zaplang-io/zap#337 adds a `bytes` type
+  plus `hex`/`base64` modules). Not needed by the SigV4 core (its hex outputs
+  come from the hex-returning `crypto` functions), but now available for binary
+  payloads (DynamoDB `B` attributes, etc.).
 
 ## Net
 
 The cryptographic core (the hard part people worry about) was easy and correct
-in Zap. The friction is entirely in **string/number ergonomics and the HTTP
-client**: percent-encoding, case/sort, `int→str`, date formatting, and outbound
-headers. Those five are the gate between this thin vertical and a usable SDK, and
-they also block the botocore-model code generator (which emits exactly this kind
-of string/number/ header manipulation per operation). Prioritizing the string
-stdlib (#2/#3) would unblock the most.
+in Zap from day one. The friction was entirely in **string/number/time
+ergonomics and the HTTP surface**: percent-encoding, case/sort, `int→str`, date
+formatting, short-circuit evaluation, and outbound headers. Phase 0 landed all
+of them (#284/#285/#335/#336/#337/#286/#338/#367/#280/#279), and Phase 1
+(aws-core, #340) rebuilt the signer as the genuine SigV4 algorithm on top — no
+pre-normalized inputs, no caller-supplied timestamps. The remaining gate to a
+*generated* SDK is module imports (#1 / #339, the repo still stitches with
+`tools/bundle.py`) and the botocore-model code generator (D-0011 §1), not the
+runtime.

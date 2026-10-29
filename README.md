@@ -22,17 +22,25 @@ is [D-0011](https://github.com/zaplang-io/zap/blob/main/design/0011-aws-sdk.md).
 
 ## What works today
 
-- **SigV4 signing**, proven byte-for-byte against AWS's published Signature
+- **Real SigV4 signing**, proven byte-for-byte against AWS's published Signature
   Version 4 worked example and reproduced independently by a Python oracle:
   the `kDate→kRegion→kService→kSigning` key chain (via `crypto.hmac_sha256_raw`,
   I#153), canonical request, string-to-sign, signature, and `Authorization`
-  header. Canonicalization is **generic**: callers pass a `dict[str,str]` of
-  headers and the core lowercases, trims and sorts them (no hand-sorted header
-  literals), so signing arbitrary header sets — including object metadata — is
-  correct.
+  header. Canonicalization is the genuine algorithm: the canonical URI is
+  percent-encoded (double-encoded for non-S3 services) and the query is
+  RFC-3986-encoded + sorted via the `url` module; header names are
+  lowercased/trimmed/sorted from a `dict[str,str]`. The `x-amz-date` and scope
+  date are stamped from the current time with `datetime` (`sign_request_now`).
+- **Request/Response model**: per-service code builds a `Request`
+  (method/service/region/host/path/query/headers/body) and hands it to the
+  runtime; `send`/`parse_response` return a parsed `Response`.
+- **Seams for the later phases**: a credentials seam (env + static now; full
+  provider chain #341), endpoint/region resolution (regional/virtual-host
+  template now; ruleset engine #342), retry (fixed cap now; standard mode #343),
+  error dispatch (`parse_error` → typed `AwsError`), and pagination hooks.
 - **Credentials** from the environment (`AWS_ACCESS_KEY_ID` /
   `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`) — the provider that also covers
-  Lambda.
+  Lambda — or from static keys.
 - **DynamoDB** (awsJson 1.0): `get_item`, `put_item`. Keys and items are
   `dict[str,str]` maps (string + numeric attributes), read like boto3's
   `Key=...` / `Item=...`.
@@ -40,8 +48,10 @@ is [D-0011](https://github.com/zaplang-io/zap/blob/main/design/0011-aws-sdk.md).
   including the `x-amz-content-sha256` / `UNSIGNED-PAYLOAD` quirk. `put_object`
   takes `content_type=` and a `metadata={...}` dict (signed `x-amz-meta-*`);
   `list_objects_v2` takes `prefix=` / `max_keys=`.
-- **HTTPS transport** over the stdlib `tls` sockets (raw HTTP/1.1, because the
-  stdlib `http` client cannot set custom headers — see FRICTION.md #5).
+- **HTTPS transport** over the stdlib `tls` sockets: the signed HTTP/1.1 request
+  is sent over a verified TLS connection and the reply is parsed into a
+  `Response { status, headers, body }` (see FRICTION.md #5 on why the transport
+  stays hand-built).
 
 Every signed request this SDK builds is reproduced bit-for-bit by an independent
 SigV4 implementation in `tools/verify_vectors.py`.
@@ -101,16 +111,15 @@ ZAP_REPO=/path/to/zap tools/run-tests.sh
 
 ## Running against real AWS
 
-The examples make a real signed call. Because the runtime cannot yet format the
-current time into SigV4's basic timestamp (FRICTION.md #4), you supply the
-timestamp from the shell:
+The examples make a real signed call. The SigV4 timestamp is now stamped by the
+SDK from the current UTC time (`sign_request_now` / `datetime`), so only the
+credentials and region are needed (the v1 `ZAP_AWS_AMZ_DATE` /
+`ZAP_AWS_DATE_STAMP` vars are gone — FRICTION.md #4 resolved):
 
 ```bash
 export AWS_ACCESS_KEY_ID=...        AWS_SECRET_ACCESS_KEY=...
 export AWS_SESSION_TOKEN=...        # only for temporary credentials
 export AWS_REGION=us-east-1
-export ZAP_AWS_AMZ_DATE=$(date -u +%Y%m%dT%H%M%SZ)
-export ZAP_AWS_DATE_STAMP=$(date -u +%Y%m%d)
 
 # DynamoDB GetItem (edit table/key in the example):
 ZAP_REPO=/path/to/zap tools/zrun.sh \
@@ -127,25 +136,32 @@ ZAP_REPO=/path/to/zap tools/zrun.sh \
     src/aws/core.zap src/aws/s3.zap examples/s3_put_object.main.zap
 ```
 
-SigV4 rejects a timestamp skewed more than ~5 minutes, so run promptly after
-setting the date vars. The example prints the signed request and the raw
-response (response parsing awaits richer strings / an `xml` module).
+SigV4 rejects a timestamp skewed more than ~5 minutes, so the host clock must be
+roughly correct. The example prints the signed request, then the parsed response
+status and body (via `aws.core.send` / `parse_response`), and surfaces a typed
+error through `parse_error` on a non-2xx reply (a full `xml` body parser is still
+future work — D-0011 §4).
 
 ## Known limitations
 
 Driven by current language/stdlib gaps — full detail and minimal repros in
-[FRICTION.md](FRICTION.md). Several v1 limits are now **resolved** (generic
-canonicalization, computed `Content-Length`, dict-based items) — see FRICTION.md
-"Resolved since v1". What remains:
+[FRICTION.md](FRICTION.md). Phase 0 + the Phase-1 aws-core rewrite resolved the
+big v1 limits (real percent-encoded URI/query canonicalization, SDK-stamped SigV4
+timestamps, generic header canonicalization, computed `Content-Length`,
+dict-based items) — see FRICTION.md "Resolved in Phase 1". What remains:
 
-- URI path segments and query keys/values must already be URI-safe (no
-  per-segment percent-encode helper yet).
-- SigV4 timestamps are supplied by the caller (no `datetime`→SigV4 strftime yet).
-- Responses are returned raw (no HTTP response parsing; S3 is rest-xml with no
-  `xml` module yet, D-0011 §4).
-- Credential chain is env-only (shared-file / IMDSv2 / container deferred).
-- Protocols: awsJson + raw SigV4 only; `rest-xml`/`query` deferred to the `xml`
-  work. Retries, pagination, presigning: follow-ups.
+- Credential chain is env + static only; the shared-config-file, IMDSv2,
+  container, and process providers are deferred to the credential seam (#341).
+- Endpoint resolution is the regional/virtual-host template; the full
+  endpoint-ruleset engine (partitions, FIPS/dualstack, access points) is #342.
+- Retry is a fixed small cap with no backoff; standard mode (token bucket,
+  exponential backoff + jitter) is #343.
+- Error dispatch and pagination are minimal baselines over the seams; a full
+  per-service error-shape registry and generated paginators are follow-ups.
+- Response parsing is status + headers + body; no chunked-transfer decode, and
+  S3's rest-xml body is returned raw (no `xml` body parser yet, D-0011 §4).
+- Protocols: awsJson + S3 rest SigV4. The build still stitches modules with
+  `tools/bundle.py` (module imports not adopted — #339).
 - JSON/metadata string values must not need escaping (no JSON string-escape pass
   yet).
 

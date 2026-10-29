@@ -33,12 +33,12 @@ Connection: close
 
 
 ### s3.ListObjectsV2 ###
-GET /?list-type=2&max-keys=10&prefix=photos/ HTTP/1.1
+GET /?list-type=2&max-keys=10&prefix=photos%2F HTTP/1.1
 host: my-bucket.s3.us-east-1.amazonaws.com
 x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 x-amz-date: 20150830T123600Z
 content-length: 0
-authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=9e11c28c57b9922e3610a1cdae775c8cdae393d3b99c85108513ddc1e5f7938d
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=61e40965e21a855a45d7b4f00a373c7ca2c68f9bf2cfae3cae11a1df9e532b37
 Connection: close
 
 

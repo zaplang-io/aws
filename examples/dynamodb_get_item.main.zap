@@ -8,19 +8,15 @@
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY   credentials (env provider)
 #   AWS_SESSION_TOKEN                          optional, for temporary creds
 #   AWS_REGION                                 e.g. us-east-1
-#   ZAP_AWS_AMZ_DATE                           SigV4 timestamp, YYYYMMDDTHHMMSSZ
-#   ZAP_AWS_DATE_STAMP                         scope date, YYYYMMDD
 #
-# The two date vars are supplied by the caller because the runtime cannot yet
-# reshape datetime.now() into the SigV4 basic format (no string surgery; see
-# FRICTION.md). Generate them in the shell right before running, e.g.:
-#   export ZAP_AWS_AMZ_DATE=$(date -u +%Y%m%dT%H%M%SZ)
-#   export ZAP_AWS_DATE_STAMP=$(date -u +%Y%m%d)
-# SigV4 rejects a timestamp skewed more than ~5 minutes, so run promptly.
+# The SigV4 timestamp is now stamped by the SDK from the current UTC time
+# (sign_request_now / datetime); the v1 ZAP_AWS_AMZ_DATE / ZAP_AWS_DATE_STAMP
+# env vars are no longer needed (FRICTION #4 resolved). SigV4 rejects a
+# timestamp skewed more than ~5 minutes, so the host clock must be roughly
+# correct.
 #
-# This demo reads table "Users" with key id="alice" (edit below). The key is an
-# ordinary dict and Content-Length is computed by the SDK, so there is nothing
-# to keep in sync by hand.
+# This demo reads table "Users" with key id="alice" (edit below), sends the
+# request over TLS, and surfaces a typed error via aws.core on a non-2xx reply.
 
 def need(str name) -> bool:
     if os.hasenv(name):
@@ -35,15 +31,10 @@ def main():
         return
     if not need("AWS_REGION"):
         return
-    if not need("ZAP_AWS_AMZ_DATE"):
-        return
-    if not need("ZAP_AWS_DATE_STAMP"):
-        return
 
     auto creds = credentials_from_env()
     auto region = os.getenv("AWS_REGION")
-    auto amz_date = os.getenv("ZAP_AWS_AMZ_DATE")
-    auto date_stamp = os.getenv("ZAP_AWS_DATE_STAMP")
+    auto t = signing_time_now()
 
     auto table = "Users"
     auto req = get_item_request(
@@ -51,11 +42,17 @@ def main():
         region,
         table,
         {"id": "alice"},
-        amz_date,
-        date_stamp,
+        t.amz_date,
+        t.date_stamp,
     )
     auto host = regional_host("dynamodb", region)
     print("--- request ---")
     print(req)
     print("--- response ---")
-    print(send_https(host, req))
+    auto resp = send(host, req)
+    print("status: " + str(resp.status))
+    print(resp.body)
+    Optional[AwsError] err = parse_error(resp)
+    if err.is_some():
+        auto e = err.unwrap()
+        print("error: " + e.code + " — " + e.message)

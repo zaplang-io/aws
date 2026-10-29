@@ -14,12 +14,13 @@ code does, rather than hard-coding a pre-sorted header block. If a future change
 to aws.core's canonicalization drifts from real SigV4, this independent
 implementation disagrees and CI fails.
 
-Uses only the Python standard library (hashlib, hmac).
+Uses only the Python standard library (hashlib, hmac, urllib.parse.quote).
 """
 import hashlib
 import hmac
 import os
 import sys
+from urllib.parse import quote
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXP = os.path.join(ROOT, "tests", "expected")
@@ -55,16 +56,45 @@ def signed_headers(headers):
     return ";".join(sorted(n.lower() for n in headers))
 
 
+# SigV4 URI-encode: RFC-3986 unreserved pass through, every other byte -> %XX
+# uppercase. `slash_safe` keeps "/" as the path separator. Mirrors url.quote /
+# url.quote_path and botocore's percent_encode (safe='-_.~', '/' added for a
+# path).
+def uri_encode(s, slash_safe):
+    return quote(s, safe="/-_.~" if slash_safe else "-_.~")
+
+
+# CanonicalURI: single-encode for S3 (path normalization disabled), double for
+# every other service — mirrors aws.core.canonical_uri.
+def canonical_uri(path, service):
+    enc = uri_encode(path, True)
+    if service != "s3":
+        enc = uri_encode(enc, True)
+    return enc
+
+
+# CanonicalQueryString: each key/value percent-encoded, pairs sorted by encoded
+# key then value — mirrors aws.core.canonical_query (url.canonical_query). A
+# reserved char in a value (e.g. "/" in an S3 prefix) becomes %2F.
 def canonical_query(params):
-    return "&".join(f"{k}={params[k]}" for k in sorted(params))
+    pairs = sorted((uri_encode(k, False), uri_encode(str(v), False))
+                   for k, v in params.items())
+    return "&".join(f"{k}={v}" for k, v in pairs)
 
 
 def sign_request(service, method, host, path, query, body, payload_sha,
                  headers):
-    """Build the full HTTP/1.1 request text exactly as aws.core.sign_request."""
+    """Build the full HTTP/1.1 request text exactly as aws.core.sign_request.
+
+    `path` is the raw path and `query` the already-canonical query string (the
+    callers build it with canonical_query). The canonical request uses the
+    percent-encoded canonical URI; the wire request line uses the single-encoded
+    path, matching aws.core.wire_path.
+    """
     ch = canonical_headers(headers)
     sh = signed_headers(headers)
-    creq = f"{method}\n{path}\n{query}\n{ch}\n{sh}\n{payload_sha}"
+    cu = canonical_uri(path, service)
+    creq = f"{method}\n{cu}\n{query}\n{ch}\n{sh}\n{payload_sha}"
     scope = f"{DS}/{REGION}/{service}/aws4_request"
     sts = f"AWS4-HMAC-SHA256\n{AMZ}\n{scope}\n{sha(creq)}"
     sig = hmac.new(signing_key(SECRET, DS, REGION, service),
@@ -74,7 +104,8 @@ def sign_request(service, method, host, path, query, body, payload_sha,
     wire = "".join(f"{n.lower()}: {headers[n]}\r\n" for n in sorted(headers))
     wire += f"content-length: {len(body)}\r\n"
     wire += f"authorization: {auth}\r\n"
-    target = path if not query else f"{path}?{query}"
+    wire_target = uri_encode(path, True)
+    target = wire_target if not query else f"{wire_target}?{query}"
     return (f"{method} {target} HTTP/1.1\r\n{wire}"
             f"Connection: close\r\n\r\n{body}")
 

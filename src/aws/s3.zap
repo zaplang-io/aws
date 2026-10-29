@@ -5,19 +5,19 @@
 # per-request payload hash in x-amz-content-sha256 (or the literal
 # UNSIGNED-PAYLOAD), a query string for listings, and signed object metadata.
 #
-# ERGONOMIC REWRITE: the operations now take keyword arguments with sensible
-# defaults (zaplang-io/zap#298) so call sites read like boto3 —
+# Each operation builds an aws.core `Request` and hands it to `sign_request`.
+# Operations take keyword arguments with sensible defaults (zaplang-io/zap#298)
+# so call sites read like boto3 —
 #   s3_put_object(creds, region, bucket, key, body, amz_date, date_stamp,
 #                 content_type="text/plain", metadata={"owner": "alice"})
 # `metadata` is a `dict[str, str]` that becomes signed `x-amz-meta-*` headers,
-# and list options (`prefix`, `max_keys`) are keyword params turned into a
-# canonical query via a dict. Content-Length is computed from the body, not
-# threaded through the API.
+# and list options (`prefix`, `max_keys`) are keyword params placed into the
+# request's query dict — the signer percent-encodes and sorts them.
 #
-# CANONICAL-URI CAVEAT (unchanged): the object key is placed into the path
-# as-is. Real SigV4 URI-encodes each path segment; there is no per-segment
-# percent-encode helper yet (FRICTION.md), so this is correct only for keys
-# whose characters are already URI-safe (A-Z a-z 0-9 - _ . ~ and "/").
+# CANONICAL-URI: the object key is placed into the path as-is; the signer now
+# URI-encodes each path segment (zaplang-io/zap#335), so keys with spaces or
+# other reserved characters sign correctly (the v1 "key must be URI-safe" caveat
+# is resolved). "/" inside a key stays a separator, matching S3's behavior.
 
 # Virtual-hosted-style host for a bucket: <bucket>.s3.<region>.amazonaws.com.
 def s3_host(str bucket, str region) -> str:
@@ -27,7 +27,7 @@ def s3_host(str bucket, str region) -> str:
 def s3_regional_host(str region) -> str:
     return "s3." + region + ".amazonaws.com"
 
-# Canonical object-key path: "/" + key (see CANONICAL-URI CAVEAT above).
+# Canonical object-key path: "/" + key.
 def s3_key_path(str key) -> str:
     return "/" + key
 
@@ -52,19 +52,18 @@ def get_object_request(
     auto host = s3_host(bucket, region)
     auto sha = payload_hash("")
     auto headers = s3_base_headers(host, sha, amz_date)
-    return sign_request(
-        creds,
-        region,
-        "s3",
-        "GET",
-        s3_key_path(key),
-        "",
-        "",
-        sha,
-        amz_date,
-        date_stamp,
-        headers,
+    dict[str, str] query = {}
+    auto req = Request(
+        method="GET",
+        service="s3",
+        region=region,
+        host=host,
+        path=s3_key_path(key),
+        query=query,
+        headers=headers,
+        body="",
     )
+    return sign_request(creds, req, amz_date, date_stamp)
 
 # PutObject: PUT /<key> with `body`. `content_type` sets the Content-Type header
 # (signed); `metadata` entries become signed `x-amz-meta-<key>` headers (names
@@ -87,22 +86,23 @@ def put_object_request(
     for name in metadata.keys():
         Optional[str] v = metadata.get(name)
         headers["x-amz-meta-" + name.lower()] = v.unwrap_or("")
-    return sign_request(
-        creds,
-        region,
-        "s3",
-        "PUT",
-        s3_key_path(key),
-        "",
-        body,
-        sha,
-        amz_date,
-        date_stamp,
-        headers,
+    dict[str, str] query = {}
+    auto req = Request(
+        method="PUT",
+        service="s3",
+        region=region,
+        host=host,
+        path=s3_key_path(key),
+        query=query,
+        headers=headers,
+        body=body,
     )
+    return sign_request(creds, req, amz_date, date_stamp)
 
 # ListObjectsV2: GET /?list-type=2 on the bucket's virtual host. `prefix`
-# restricts keys; `max_keys` caps the page size (0 = omit, server default).
+# restricts keys; `max_keys` caps the page size (0 = omit, server default). The
+# options go into the request's query dict as decoded values; the signer
+# percent-encodes them (so a "/" in `prefix` is sent as %2F, per SigV4).
 def list_objects_v2_request(
     Credentials creds,
     str region,
@@ -120,18 +120,15 @@ def list_objects_v2_request(
         params["prefix"] = prefix
     if max_keys > 0:
         params["max-keys"] = str(max_keys)
-    auto query = canonical_query(params)
     auto headers = s3_base_headers(host, sha, amz_date)
-    return sign_request(
-        creds,
-        region,
-        "s3",
-        "GET",
-        "/",
-        query,
-        "",
-        sha,
-        amz_date,
-        date_stamp,
-        headers,
+    auto req = Request(
+        method="GET",
+        service="s3",
+        region=region,
+        host=host,
+        path="/",
+        query=params,
+        headers=headers,
+        body="",
     )
+    return sign_request(creds, req, amz_date, date_stamp)
