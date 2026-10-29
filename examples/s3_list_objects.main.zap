@@ -1,7 +1,7 @@
 # Live example: S3 ListObjectsV2 against real AWS (virtual-hosted-style).
 #
 # Bundle + run:
-#   tools/zrun.sh src/aws/core.zap src/aws/s3.zap \
+#   tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap src/aws/s3.zap \
 #       examples/s3_list_objects.main.zap
 #
 # Required environment (see README "Running against real AWS"):

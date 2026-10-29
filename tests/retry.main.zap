@@ -11,7 +11,8 @@
 # loop runs with base_delay 0 (so it neither sleeps nor consumes the RNG) while
 # the jitter formula itself is checked separately under a seed.
 #
-# Run: tools/zrun.sh src/aws/core.zap src/aws/retry.zap tests/retry.main.zap
+# Run: tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap src/aws/retry.zap \
+#          tests/retry.main.zap
 
 # --- injected transport: a scripted sequence of responses ------------------
 

@@ -29,10 +29,11 @@ jobs:
               # Real compile + run: proves aws.core PRODUCES the signed bytes.
               bash tools/run-tests.sh
               # Compile-smoke the service modules + examples (guards on missing env).
-              bash tools/zrun.sh src/aws/core.zap src/aws/retry.zap src/aws/dynamodb.zap \
+              bash tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap \
+                src/aws/retry.zap src/aws/dynamodb.zap \
                 examples/dynamodb_get_item.main.zap
-              bash tools/zrun.sh src/aws/core.zap src/aws/s3.zap \
-                examples/s3_list_objects.main.zap
-              bash tools/zrun.sh src/aws/core.zap src/aws/s3.zap \
-                examples/s3_put_object.main.zap
+              bash tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap \
+                src/aws/s3.zap examples/s3_list_objects.main.zap
+              bash tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap \
+                src/aws/s3.zap examples/s3_put_object.main.zap
             '
