@@ -255,12 +255,7 @@ def query_sign(
 
 # Encode + sign a query/ec2 operation using the current UTC time and the
 # service's regional endpoint — the usual live path (mirrors awsjson_request_now).
-def query_request(
-    Credentials creds,
-    str service,
-    str region,
-    list[QueryPair] p,
-) -> str:
+def query_request(Credentials creds, str service, str region, list[QueryPair] p) -> str:
     auto host = regional_host(service, region)
     auto t = signing_time_now()
     return query_sign(creds, service, region, host, p, t.amz_date, t.date_stamp)
