@@ -46,6 +46,10 @@ run_case credentials_chain \
     src/aws/core.zap src/aws/endpoints.zap src/aws/credentials.zap \
     tests/credentials_chain.main.zap
 
+run_case restjson_binding \
+    src/aws/core.zap src/aws/endpoints.zap src/aws/binding.zap src/aws/restjson.zap \
+    tests/restjson_binding.main.zap
+
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2
     exit 1
