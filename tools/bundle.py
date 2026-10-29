@@ -18,11 +18,13 @@ The file list is supplied on the command line (library modules first, the
 bundled after core and before the service modules that ride it),
 `src/aws/binding.zap` (the protocol-agnostic HTTP binding layer),
 `src/aws/restjson.zap` (the rest-json codec), `src/aws/restxml.zap` (the rest-xml
-codec, XML document body over the same binding layer), `src/aws/dynamodb.zap` and
+codec, XML document body over the same binding layer), `src/aws/query.zap` (the
+query + ec2 codec: form-urlencoded request body, XML response, riding on core
+like awsjson — no binding dependency), `src/aws/dynamodb.zap` and
 `src/aws/s3.zap`; the test/example harnesses in tools/ pass the subset each entry
 point needs. `binding.zap` depends on `core.zap`, and `restjson.zap` /
 `restxml.zap` on both, so bundle them in that order (core, then binding, then the
-rest-* codec).
+rest-* codec); `query.zap` depends only on `core.zap` (bundle core, then query).
 
 Usage:
     tools/bundle.py src/aws/core.zap src/aws/credentials.zap tests/foo.main.zap > out.zap
