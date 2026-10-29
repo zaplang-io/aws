@@ -13,7 +13,7 @@
 # trims and sorts it. Matching AWS's published signature proves the canonical
 # path is correct, not just a hand-sorted literal block.
 #
-# Run:  tools/zrun.sh src/aws/core.zap tests/sigv4_vectors.main.zap
+# Run:  tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap tests/sigv4_vectors.main.zap
 
 def main():
     # --- published example inputs ---------------------------------------
