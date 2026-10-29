@@ -60,11 +60,13 @@ SigV4 implementation in `tools/verify_vectors.py`.
 
 ```
 zap.toml                       package manifest (official-tier metadata)
-src/aws/core.zap               shared core: credentials, SigV4, endpoints, transport
+src/aws/core.zap               shared core: credentials seam, SigV4, endpoints, transport
+src/aws/credentials.zap        boto3-style credential provider chain (env/INI/IMDS/container/process)
 src/aws/dynamodb.zap           DynamoDB client (get_item, put_item)
 src/aws/s3.zap                 S3 client (get_object, put_object, list_objects_v2)
 tests/sigv4_vectors.main.zap   offline SigV4 conformance vs AWS's published vectors
 tests/service_signing.main.zap offline: full signed DynamoDB/S3 requests, pinned
+tests/credentials_chain.main.zap offline: provider chain ordering + INI/JSON/process parsers
 tests/expected/*.expected      pinned expected output
 examples/*.main.zap            runnable live-AWS examples (get-item, list, put-object)
 tools/bundle.py                stitch modules + a main() into one compilable file

@@ -38,6 +38,10 @@ run_case service_signing \
     src/aws/core.zap src/aws/dynamodb.zap src/aws/s3.zap \
     tests/service_signing.main.zap
 
+run_case credentials_chain \
+    src/aws/core.zap src/aws/credentials.zap \
+    tests/credentials_chain.main.zap
+
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2
     exit 1
