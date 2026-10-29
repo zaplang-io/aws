@@ -8,6 +8,12 @@ so a regression in the fixtures is caught even on a runner without an LLVM Zap
 build. The Zap side (that aws.core actually PRODUCES these bytes) is proven by
 tools/run-tests.sh against the real toolchain; see README/CI.
 
+The oracle mirrors aws.core's GENERIC canonicalization: it is given a dict of
+headers to sign and lowercases / trims / sorts them itself, exactly as the Zap
+code does, rather than hard-coding a pre-sorted header block. If a future change
+to aws.core's canonicalization drifts from real SigV4, this independent
+implementation disagrees and CI fails.
+
 Uses only the Python standard library (hashlib, hmac).
 """
 import hashlib
@@ -29,86 +35,153 @@ def sha(s):
     return hashlib.sha256(s.encode()).hexdigest()
 
 
-def hm(k, m):
-    return hmac.new(k, m.encode(), hashlib.sha256).digest()
-
-
 def signing_key(secret, ds, region, svc):
-    k = hm(("AWS4" + secret).encode(), ds)
-    k = hm(k, region)
-    k = hm(k, svc)
-    return hm(k, "aws4_request")
+    k = hmac.new(("AWS4" + secret).encode(), ds.encode(), hashlib.sha256).digest()
+    k = hmac.new(k, region.encode(), hashlib.sha256).digest()
+    k = hmac.new(k, svc.encode(), hashlib.sha256).digest()
+    return hmac.new(k, b"aws4_request", hashlib.sha256).digest()
 
 
-def sign(secret, ds, region, svc, creq):
-    scope = f"{ds}/{region}/{svc}/aws4_request"
-    sts = "AWS4-HMAC-SHA256\n" + AMZ + "\n" + scope + "\n" + sha(creq)
-    return hmac.new(signing_key(secret, ds, region, svc),
-                    sts.encode(), hashlib.sha256).hexdigest(), scope
+# --- generic canonicalization (mirrors aws.core) ---------------------------
 
+def canonical_headers(headers):
+    out = ""
+    for name in sorted(headers):
+        out += name.lower() + ":" + headers[name].strip() + "\n"
+    return out
+
+
+def signed_headers(headers):
+    return ";".join(sorted(n.lower() for n in headers))
+
+
+def canonical_query(params):
+    return "&".join(f"{k}={params[k]}" for k in sorted(params))
+
+
+def sign_request(service, method, host, path, query, body, payload_sha,
+                 headers):
+    """Build the full HTTP/1.1 request text exactly as aws.core.sign_request."""
+    ch = canonical_headers(headers)
+    sh = signed_headers(headers)
+    creq = f"{method}\n{path}\n{query}\n{ch}\n{sh}\n{payload_sha}"
+    scope = f"{DS}/{REGION}/{service}/aws4_request"
+    sts = f"AWS4-HMAC-SHA256\n{AMZ}\n{scope}\n{sha(creq)}"
+    sig = hmac.new(signing_key(SECRET, DS, REGION, service),
+                   sts.encode(), hashlib.sha256).hexdigest()
+    auth = (f"AWS4-HMAC-SHA256 Credential={ACCESS}/{scope}, "
+            f"SignedHeaders={sh}, Signature={sig}")
+    wire = "".join(f"{n.lower()}: {headers[n]}\r\n" for n in sorted(headers))
+    wire += f"content-length: {len(body)}\r\n"
+    wire += f"authorization: {auth}\r\n"
+    target = path if not query else f"{path}?{query}"
+    return (f"{method} {target} HTTP/1.1\r\n{wire}"
+            f"Connection: close\r\n\r\n{body}")
+
+
+# --- the AWS published SigV4 worked example (unchanged, service "iam") ------
 
 def sigv4_vectors():
     body_hash = sha("")
-    ctype = "application/x-www-form-urlencoded; charset=utf-8"
+    headers = {
+        "content-type": "application/x-www-form-urlencoded; charset=utf-8",
+        "host": "iam.amazonaws.com",
+        "x-amz-date": AMZ,
+    }
     query = "Action=ListUsers&Version=2010-05-08"
-    ch = (f"content-type:{ctype}\nhost:iam.amazonaws.com\n"
-          f"x-amz-date:{AMZ}\n")
-    sh = "content-type;host;x-amz-date"
+    ch = canonical_headers(headers)
+    sh = signed_headers(headers)
     creq = f"GET\n/\n{query}\n{ch}\n{sh}\n{body_hash}"
     key = signing_key(SECRET, DS, REGION, "iam")
     key_fp = hashlib.sha256(key).hexdigest()
-    sig, scope = sign(SECRET, DS, REGION, "iam", creq)
+    scope = f"{DS}/{REGION}/iam/aws4_request"
+    sts = f"AWS4-HMAC-SHA256\n{AMZ}\n{scope}\n{sha(creq)}"
+    sig = hmac.new(key, sts.encode(), hashlib.sha256).hexdigest()
     auth = (f"AWS4-HMAC-SHA256 Credential={ACCESS}/{scope}, "
             f"SignedHeaders={sh}, Signature={sig}")
     return "\n".join([sha(""), sha(creq), key_fp, sig, auth]) + "\n"
 
 
-def http_req(method, target, headers_block, body):
-    return (f"{method} {target} HTTP/1.1\r\n{headers_block}"
-            f"Connection: close\r\n\r\n{body}")
+# --- full signed service requests ------------------------------------------
+
+def ddb_attrs(strings, numbers):
+    frags = []
+    for name in sorted(set(strings) | set(numbers)):
+        if name in strings:
+            frags.append(f'"{name}":{{"S":"{strings[name]}"}}')
+        else:
+            frags.append(f'"{name}":{{"N":"{numbers[name]}"}}')
+    return ",".join(frags)
 
 
 def service_signing():
     out = []
-    # DynamoDB GetItem
-    host = "dynamodb.us-east-1.amazonaws.com"
-    body = '{"TableName":"Users","Key":{"id":{"S":"alice"}}}'
-    bh = sha(body)
+    ddb_host = "dynamodb.us-east-1.amazonaws.com"
     ctype = "application/x-amz-json-1.0"
-    target = "DynamoDB_20120810.GetItem"
-    ch = (f"content-type:{ctype}\nhost:{host}\n"
-          f"x-amz-content-sha256:{bh}\nx-amz-date:{AMZ}\n"
-          f"x-amz-target:{target}\n")
-    sh = "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target"
-    creq = f"POST\n/\n\n{ch}\n{sh}\n{bh}"
-    sig, scope = sign(SECRET, DS, REGION, "dynamodb", creq)
-    auth = (f"AWS4-HMAC-SHA256 Credential={ACCESS}/{scope}, "
-            f"SignedHeaders={sh}, Signature={sig}")
-    hb = (f"Host: {host}\r\nContent-Type: {ctype}\r\n"
-          f"X-Amz-Date: {AMZ}\r\nX-Amz-Content-Sha256: {bh}\r\n"
-          f"X-Amz-Target: {target}\r\nContent-Length: 48\r\n"
-          f"Authorization: {auth}\r\n")
-    out.append("### dynamodb.GetItem ###")
-    out.append(http_req("POST", "/", hb, body))
 
-    # S3 GetObject + PutObject
+    def ddb_headers(body_sha, op):
+        return {
+            "content-type": ctype,
+            "host": ddb_host,
+            "x-amz-content-sha256": body_sha,
+            "x-amz-date": AMZ,
+            "x-amz-target": f"DynamoDB_20120810.{op}",
+        }
+
+    # DynamoDB GetItem
+    body = '{"TableName":"Users","Key":{' + ddb_attrs({"id": "alice"}, {}) + '}}'
+    bh = sha(body)
+    out.append("### dynamodb.GetItem ###")
+    out.append(sign_request("dynamodb", "POST", ddb_host, "/", "", body, bh,
+                            ddb_headers(bh, "GetItem")))
+
+    # DynamoDB PutItem
+    body = ('{"TableName":"Users","Item":{'
+            + ddb_attrs({"id": "alice", "name": "Alice"}, {"age": "30"}) + '}}')
+    bh = sha(body)
+    out.append("### dynamodb.PutItem ###")
+    out.append(sign_request("dynamodb", "POST", ddb_host, "/", "", body, bh,
+                            ddb_headers(bh, "PutItem")))
+
     s3host = "my-bucket.s3.us-east-1.amazonaws.com"
-    sh3 = "host;x-amz-content-sha256;x-amz-date"
-    for label, method, target, bdy, clen in [
-        ("### s3.GetObject ###", "GET", "/hello.txt", "", "0"),
-        ("### s3.PutObject ###", "PUT", "/hello.txt", "hi", "2"),
-    ]:
-        ph = sha(bdy)
-        ch = f"host:{s3host}\nx-amz-content-sha256:{ph}\nx-amz-date:{AMZ}\n"
-        creq = f"{method}\n{target}\n\n{ch}\n{sh3}\n{ph}"
-        sig, scope = sign(SECRET, DS, REGION, "s3", creq)
-        auth = (f"AWS4-HMAC-SHA256 Credential={ACCESS}/{scope}, "
-                f"SignedHeaders={sh3}, Signature={sig}")
-        hb = (f"Host: {s3host}\r\nX-Amz-Date: {AMZ}\r\n"
-              f"X-Amz-Content-Sha256: {ph}\r\nContent-Length: {clen}\r\n"
-              f"Authorization: {auth}\r\n")
-        out.append(label)
-        out.append(http_req(method, target, hb, bdy))
+
+    def s3_base(payload_sha):
+        return {
+            "host": s3host,
+            "x-amz-content-sha256": payload_sha,
+            "x-amz-date": AMZ,
+        }
+
+    # S3 GetObject
+    ph = sha("")
+    out.append("### s3.GetObject ###")
+    out.append(sign_request("s3", "GET", s3host, "/hello.txt", "", "", ph,
+                            s3_base(ph)))
+
+    # S3 ListObjectsV2 with prefix + max_keys
+    ph = sha("")
+    query = canonical_query({"list-type": "2", "prefix": "photos/",
+                             "max-keys": "10"})
+    out.append("### s3.ListObjectsV2 ###")
+    out.append(sign_request("s3", "GET", s3host, "/", query, "", ph,
+                            s3_base(ph)))
+
+    # S3 PutObject (default content type)
+    body = "hi"
+    ph = sha(body)
+    h = s3_base(ph)
+    h["content-type"] = "application/octet-stream"
+    out.append("### s3.PutObject ###")
+    out.append(sign_request("s3", "PUT", s3host, "/hello.txt", "", body, ph, h))
+
+    # S3 PutObject with content type + metadata (kept last: non-empty body).
+    h = s3_base(ph)
+    h["content-type"] = "text/plain"
+    h["x-amz-meta-owner"] = "alice"
+    h["x-amz-meta-team"] = "zap"
+    out.append("### s3.PutObject+meta ###")
+    out.append(sign_request("s3", "PUT", s3host, "/hello.txt", "", body, ph, h))
+
     return "\n".join(out) + "\n"
 
 

@@ -5,14 +5,20 @@ official-packages tier (D-0056): developed under `zaplang-io`, installed and
 managed by the Zap package manager — **not** a bundled stdlib module. The design
 is [D-0011](https://github.com/zaplang-io/zap/blob/main/design/0011-aws-sdk.md).
 
-> **Status: v1 hand-written thin vertical.** This is deliberately a small,
+> **Status: hand-written S3 + DynamoDB + SigV4 core.** A deliberately small,
 > hand-written slice — a shared SigV4/credentials/transport **core** plus
 > hand-written **S3** and **DynamoDB** clients — built to make Zap runnable
-> against real AWS and, just as importantly, to surface the language/stdlib gaps
-> that a real SDK hits. The production SDK is build-time code generation from the
-> botocore service models (D-0011 §1); that generator is a later phase. The
-> friction this slice uncovered is written up in [FRICTION.md](FRICTION.md) and
-> is a primary deliverable.
+> against real AWS and to surface the language/stdlib gaps that a real SDK hits.
+> The production SDK is build-time code generation from the botocore service
+> models (D-0011 §1); that generator is a later phase.
+>
+> Several of the gaps the first cut hit have since landed in the language
+> (real strings, f-strings, default/keyword arguments, dict iteration + `get`),
+> and this slice has been **reworked to the ergonomic, boto3-faithful API** they
+> enable: keyword arguments with defaults, `dict` headers/metadata/keys, generic
+> dict-driven SigV4 canonicalization, and `Content-Length` computed for you. The
+> remaining friction is written up in [FRICTION.md](FRICTION.md) and is a primary
+> deliverable.
 
 ## What works today
 
@@ -20,14 +26,20 @@ is [D-0011](https://github.com/zaplang-io/zap/blob/main/design/0011-aws-sdk.md).
   Version 4 worked example and reproduced independently by a Python oracle:
   the `kDate→kRegion→kService→kSigning` key chain (via `crypto.hmac_sha256_raw`,
   I#153), canonical request, string-to-sign, signature, and `Authorization`
-  header.
+  header. Canonicalization is **generic**: callers pass a `dict[str,str]` of
+  headers and the core lowercases, trims and sorts them (no hand-sorted header
+  literals), so signing arbitrary header sets — including object metadata — is
+  correct.
 - **Credentials** from the environment (`AWS_ACCESS_KEY_ID` /
   `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`) — the provider that also covers
   Lambda.
-- **DynamoDB** (awsJson 1.0): `get_item`, `put_item` request building + signing.
-- **S3** (virtual-hosted-style): `get_object`, `put_object`, `list_objects_v2`
-  request building + signing, including the `x-amz-content-sha256` /
-  `UNSIGNED-PAYLOAD` quirk.
+- **DynamoDB** (awsJson 1.0): `get_item`, `put_item`. Keys and items are
+  `dict[str,str]` maps (string + numeric attributes), read like boto3's
+  `Key=...` / `Item=...`.
+- **S3** (virtual-hosted-style): `get_object`, `put_object`, `list_objects_v2`,
+  including the `x-amz-content-sha256` / `UNSIGNED-PAYLOAD` quirk. `put_object`
+  takes `content_type=` and a `metadata={...}` dict (signed `x-amz-meta-*`);
+  `list_objects_v2` takes `prefix=` / `max_keys=`.
 - **HTTPS transport** over the stdlib `tls` sockets (raw HTTP/1.1, because the
   stdlib `http` client cannot set custom headers — see FRICTION.md #5).
 
@@ -44,7 +56,7 @@ src/aws/s3.zap                 S3 client (get_object, put_object, list_objects_v
 tests/sigv4_vectors.main.zap   offline SigV4 conformance vs AWS's published vectors
 tests/service_signing.main.zap offline: full signed DynamoDB/S3 requests, pinned
 tests/expected/*.expected      pinned expected output
-examples/*.main.zap            runnable live-AWS examples
+examples/*.main.zap            runnable live-AWS examples (get-item, list, put-object)
 tools/bundle.py                stitch modules + a main() into one compilable file
 tools/zrun.sh                  bundle + run with the Zap toolchain
 tools/run-tests.sh             run the offline suite, diff vs expected
@@ -52,10 +64,13 @@ tools/verify_vectors.py        independent SigV4 oracle (toolchain-free CI cross
 ```
 
 The core and per-service modules are kept cleanly separated so the codegen
-generator can slot in later (D-0011 §2). They are **bundled** rather than
-`import`ed because the compiler does not consume Zap-to-Zap package imports yet
-(FRICTION.md #1); when that lands, each file becomes an importable package
-(`aws-core`, `aws-s3`, `aws-dynamodb`).
+generator can slot in later (D-0011 §2). They are still **bundled** rather than
+`import`ed: Zap-to-Zap module imports have since landed (zaplang-io/zap#283), but
+local-module resolution is rooted at the entry file's own directory, so adopting
+`import` cleanly means relocating every runnable entry (tests, examples) beside
+the library or shipping the core as a materialized package. That re-layout is a
+follow-up (see [FRICTION.md](FRICTION.md) #1); it is deliberately out of scope
+for this ergonomic rewrite of the clients.
 
 ## Building the toolchain
 
@@ -105,26 +120,34 @@ ZAP_REPO=/path/to/zap tools/zrun.sh \
 export ZAP_AWS_BUCKET=my-bucket
 ZAP_REPO=/path/to/zap tools/zrun.sh \
     src/aws/core.zap src/aws/s3.zap examples/s3_list_objects.main.zap
+
+# S3 PutObject with a content type + metadata (boto3-style keyword args):
+export ZAP_AWS_BUCKET=my-bucket ZAP_AWS_KEY=hello.txt
+ZAP_REPO=/path/to/zap tools/zrun.sh \
+    src/aws/core.zap src/aws/s3.zap examples/s3_put_object.main.zap
 ```
 
 SigV4 rejects a timestamp skewed more than ~5 minutes, so run promptly after
 setting the date vars. The example prints the signed request and the raw
 response (response parsing awaits richer strings / an `xml` module).
 
-## Known limitations (v1)
+## Known limitations
 
 Driven by current language/stdlib gaps — full detail and minimal repros in
-[FRICTION.md](FRICTION.md):
+[FRICTION.md](FRICTION.md). Several v1 limits are now **resolved** (generic
+canonicalization, computed `Content-Length`, dict-based items) — see FRICTION.md
+"Resolved since v1". What remains:
 
-- Header names are hand-written lowercase in fixed sorted order; URIs/keys must
-  already be URI-safe (no runtime percent-encoding, case conversion, or sort).
-- `Content-Length` and other numbers are passed in as strings (no `int→str`).
-- SigV4 timestamps are supplied by the caller (no `datetime`→SigV4 formatting).
+- URI path segments and query keys/values must already be URI-safe (no
+  per-segment percent-encode helper yet).
+- SigV4 timestamps are supplied by the caller (no `datetime`→SigV4 strftime yet).
 - Responses are returned raw (no HTTP response parsing; S3 is rest-xml with no
   `xml` module yet, D-0011 §4).
 - Credential chain is env-only (shared-file / IMDSv2 / container deferred).
 - Protocols: awsJson + raw SigV4 only; `rest-xml`/`query` deferred to the `xml`
-  work. `Optional[T]` modeling, retries, pagination, presigning: follow-ups.
+  work. Retries, pagination, presigning: follow-ups.
+- JSON/metadata string values must not need escaping (no JSON string-escape pass
+  yet).
 
 ## License
 

@@ -1,32 +1,68 @@
 ### dynamodb.GetItem ###
 POST / HTTP/1.1
-Host: dynamodb.us-east-1.amazonaws.com
-Content-Type: application/x-amz-json-1.0
-X-Amz-Date: 20150830T123600Z
-X-Amz-Content-Sha256: 3914813204b784eef1457fa6e06199fef9ac217c3848f9fbcc9d6f305b9a1207
-X-Amz-Target: DynamoDB_20120810.GetItem
-Content-Length: 48
-Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/dynamodb/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target, Signature=dc3c0f940383092e87401918f2977af4180c2221ae0192f4f42eabd585d60a79
+content-type: application/x-amz-json-1.0
+host: dynamodb.us-east-1.amazonaws.com
+x-amz-content-sha256: 3914813204b784eef1457fa6e06199fef9ac217c3848f9fbcc9d6f305b9a1207
+x-amz-date: 20150830T123600Z
+x-amz-target: DynamoDB_20120810.GetItem
+content-length: 48
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/dynamodb/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target, Signature=dc3c0f940383092e87401918f2977af4180c2221ae0192f4f42eabd585d60a79
 Connection: close
 
 {"TableName":"Users","Key":{"id":{"S":"alice"}}}
+### dynamodb.PutItem ###
+POST / HTTP/1.1
+content-type: application/x-amz-json-1.0
+host: dynamodb.us-east-1.amazonaws.com
+x-amz-content-sha256: 6e313e929a2cbc71271cbe4a57bc4d9ed1ae74f639d0335084da0061270bb461
+x-amz-date: 20150830T123600Z
+x-amz-target: DynamoDB_20120810.PutItem
+content-length: 87
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/dynamodb/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target, Signature=8e827a0e23ae83d86f0da15cca3fe5869eb83bd88a20a4e48a79fccaea2624b2
+Connection: close
+
+{"TableName":"Users","Item":{"age":{"N":"30"},"id":{"S":"alice"},"name":{"S":"Alice"}}}
 ### s3.GetObject ###
 GET /hello.txt HTTP/1.1
-Host: my-bucket.s3.us-east-1.amazonaws.com
-X-Amz-Date: 20150830T123600Z
-X-Amz-Content-Sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-Content-Length: 0
-Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=6b5e94eeb7dc365255d8a6ff817fb42d4d0f372408bdbf2a74da5127bcfe3273
+host: my-bucket.s3.us-east-1.amazonaws.com
+x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+x-amz-date: 20150830T123600Z
+content-length: 0
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=6b5e94eeb7dc365255d8a6ff817fb42d4d0f372408bdbf2a74da5127bcfe3273
+Connection: close
+
+
+### s3.ListObjectsV2 ###
+GET /?list-type=2&max-keys=10&prefix=photos/ HTTP/1.1
+host: my-bucket.s3.us-east-1.amazonaws.com
+x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+x-amz-date: 20150830T123600Z
+content-length: 0
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=9e11c28c57b9922e3610a1cdae775c8cdae393d3b99c85108513ddc1e5f7938d
 Connection: close
 
 
 ### s3.PutObject ###
 PUT /hello.txt HTTP/1.1
-Host: my-bucket.s3.us-east-1.amazonaws.com
-X-Amz-Date: 20150830T123600Z
-X-Amz-Content-Sha256: 8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4
-Content-Length: 2
-Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=18b04149feb1aacdd1e5718bad81dd37f4f2549f02a3aa037fdd9826016dfedd
+content-type: application/octet-stream
+host: my-bucket.s3.us-east-1.amazonaws.com
+x-amz-content-sha256: 8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4
+x-amz-date: 20150830T123600Z
+content-length: 2
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, Signature=9544ee2b28f38d21863705257b72d8aea1c821f6c22213e7760ff0259fedbb3b
+Connection: close
+
+hi
+### s3.PutObject+meta ###
+PUT /hello.txt HTTP/1.1
+content-type: text/plain
+host: my-bucket.s3.us-east-1.amazonaws.com
+x-amz-content-sha256: 8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4
+x-amz-date: 20150830T123600Z
+x-amz-meta-owner: alice
+x-amz-meta-team: zap
+content-length: 2
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-meta-owner;x-amz-meta-team, Signature=7c5a4e5b9c982378f149a5fb8590904d4fb65c9ef645265edd84dafe2fa7c25c
 Connection: close
 
 hi

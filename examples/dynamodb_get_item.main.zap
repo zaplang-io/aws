@@ -18,9 +18,9 @@
 #   export ZAP_AWS_DATE_STAMP=$(date -u +%Y%m%d)
 # SigV4 rejects a timestamp skewed more than ~5 minutes, so run promptly.
 #
-# This demo reads table "Users" with key id="alice" (edit below). The request
-# body length is hard-coded to match those exact strings — change the body and
-# you must update content_length too (no int->str at runtime; FRICTION.md).
+# This demo reads table "Users" with key id="alice" (edit below). The key is an
+# ordinary dict and Content-Length is computed by the SDK, so there is nothing
+# to keep in sync by hand.
 
 def need(str name) -> bool:
     if os.hasenv(name):
@@ -46,14 +46,13 @@ def main():
     auto date_stamp = os.getenv("ZAP_AWS_DATE_STAMP")
 
     auto table = "Users"
-    auto key_name = "id"
-    auto key_value = "alice"
-    # len('{"TableName":"Users","Key":{"id":{"S":"alice"}}}') == 48
-    auto content_length = "48"
-
     auto req = get_item_request(
-        creds, region, table, key_name, key_value, amz_date, date_stamp,
-        content_length,
+        creds,
+        region,
+        table,
+        {"id": "alice"},
+        amz_date,
+        date_stamp,
     )
     auto host = regional_host("dynamodb", region)
     print("--- request ---")
