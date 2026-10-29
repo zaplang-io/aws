@@ -6,12 +6,12 @@
 # path is always "/", there is no query string, and the signed header set is
 # small.
 #
-# ERGONOMIC REWRITE: items and keys are now ordinary `dict[str, str]` maps built
-# at the call site and turned into AttributeValue JSON by dict iteration
-# (zaplang-io/zap#299) — v1 forced the caller to pre-build each `{"S":...}`
-# fragment by hand. Attribute names are emitted in sorted order so the wire body
-# is deterministic regardless of dict iteration order. Numeric ("N") attributes
-# are passed as a second dict and no longer need a separate hand-written builder.
+# Each operation builds an aws.core `Request` and hands it to `sign_request`.
+# Items and keys are ordinary `dict[str, str]` maps built at the call site and
+# turned into AttributeValue JSON by dict iteration (zaplang-io/zap#299).
+# Attribute names are emitted in sorted order so the wire body is deterministic
+# regardless of dict iteration order. Numeric ("N") attributes are passed as a
+# second dict.
 #
 # JSON string values must still not contain characters needing JSON escaping
 # (no escaping pass yet); numbers are passed as their decimal digits.
@@ -51,7 +51,7 @@ def ddb_attributes(dict[str, str] strings, dict[str, str] numbers) -> str:
             names.append(k)
     auto out = ""
     auto first = True
-    for name in sorted_strings(names):
+    for name in sorted(names):
         auto frag = ""
         if name in strings:
             Optional[str] sv = strings.get(name)
@@ -101,19 +101,18 @@ def get_item_request(
     auto body = get_item_body(table, key)
     auto body_sha = payload_hash(body)
     auto headers = ddb_headers(host, body_sha, amz_date, "GetItem")
-    return sign_request(
-        creds,
-        region,
-        "dynamodb",
-        "POST",
-        "/",
-        "",
-        body,
-        body_sha,
-        amz_date,
-        date_stamp,
-        headers,
+    dict[str, str] query = {}
+    auto req = Request(
+        method="POST",
+        service="dynamodb",
+        region=region,
+        host=host,
+        path="/",
+        query=query,
+        headers=headers,
+        body=body,
     )
+    return sign_request(creds, req, amz_date, date_stamp)
 
 # PutItem. `item` is the string attributes as a map (e.g. {"id": "alice",
 # "name": "Alice"}); pass `numbers` for numeric ("N") attributes
@@ -131,16 +130,15 @@ def put_item_request(
     auto body = put_item_body(table, item, numbers)
     auto body_sha = payload_hash(body)
     auto headers = ddb_headers(host, body_sha, amz_date, "PutItem")
-    return sign_request(
-        creds,
-        region,
-        "dynamodb",
-        "POST",
-        "/",
-        "",
-        body,
-        body_sha,
-        amz_date,
-        date_stamp,
-        headers,
+    dict[str, str] query = {}
+    auto req = Request(
+        method="POST",
+        service="dynamodb",
+        region=region,
+        host=host,
+        path="/",
+        query=query,
+        headers=headers,
+        body=body,
     )
+    return sign_request(creds, req, amz_date, date_stamp)

@@ -11,9 +11,10 @@
 #   AWS_REGION                                 bucket's region, e.g. us-east-1
 #   ZAP_AWS_BUCKET                             bucket name
 #   ZAP_AWS_KEY                                object key, e.g. hello.txt
-#   ZAP_AWS_AMZ_DATE / ZAP_AWS_DATE_STAMP      SigV4 timestamp + scope date
-#     export ZAP_AWS_AMZ_DATE=$(date -u +%Y%m%dT%H%M%SZ)
-#     export ZAP_AWS_DATE_STAMP=$(date -u +%Y%m%d)
+#
+# The SigV4 timestamp is stamped by the SDK from the current UTC time
+# (sign_request_now / datetime), so the v1 ZAP_AWS_AMZ_DATE / ZAP_AWS_DATE_STAMP
+# env vars are no longer needed (FRICTION #4 resolved).
 #
 # The body, content type and metadata below are the whole payload the SDK signs;
 # Content-Length and the x-amz-meta-* headers are derived for you.
@@ -35,17 +36,12 @@ def main():
         return
     if not need("ZAP_AWS_KEY"):
         return
-    if not need("ZAP_AWS_AMZ_DATE"):
-        return
-    if not need("ZAP_AWS_DATE_STAMP"):
-        return
 
     auto creds = credentials_from_env()
     auto region = os.getenv("AWS_REGION")
     auto bucket = os.getenv("ZAP_AWS_BUCKET")
     auto key = os.getenv("ZAP_AWS_KEY")
-    auto amz_date = os.getenv("ZAP_AWS_AMZ_DATE")
-    auto date_stamp = os.getenv("ZAP_AWS_DATE_STAMP")
+    auto t = signing_time_now()
 
     auto req = put_object_request(
         creds,
@@ -53,8 +49,8 @@ def main():
         bucket,
         key,
         "hello from zap\n",
-        amz_date,
-        date_stamp,
+        t.amz_date,
+        t.date_stamp,
         content_type="text/plain",
         metadata={"owner": "zap", "source": "example"},
     )
@@ -62,4 +58,10 @@ def main():
     print("--- request ---")
     print(req)
     print("--- response ---")
-    print(send_https(host, req))
+    auto resp = send(host, req)
+    print("status: " + str(resp.status))
+    print(resp.body)
+    Optional[AwsError] err = parse_error(resp)
+    if err.is_some():
+        auto e = err.unwrap()
+        print("error: " + e.code + " — " + e.message)

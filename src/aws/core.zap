@@ -1,41 +1,50 @@
-# aws.core — shared hand-written core for the Zap AWS SDK.
+# aws.core — the protocol-agnostic shared runtime for the Zap AWS SDK.
 #
 # This module is the "botocore runtime" half of the design (D-0011 §2): the
-# bounded, hand-written pieces every service shares — credential resolution,
-# SigV4 request signing, endpoint/host resolution, and an HTTPS transport over
-# the stdlib `tls` sockets. The per-service modules (aws.s3, aws.dynamodb) build
-# requests and hand them to the functions here.
+# bounded, hand-written pieces that ~70% of every AWS service rides on —
+# credentials, a Request/Response model, a real SigV4 signer, an HTTPS transport
+# over the stdlib `tls` sockets, and the seams the later phases fill (endpoint/
+# region resolution #342, retry #343, a full credential chain #341, error
+# dispatch, pagination). Per-service modules (aws.s3, aws.dynamodb) build a
+# `Request` and hand it here.
 #
-# ERGONOMIC REWRITE: the first cut of this core predated several language
-# features and had to work around their absence (see FRICTION.md). SigV4
-# canonicalization is *generic* here now that the runtime exposes real strings
-# and dicts (zaplang-io/zap#284/#285/#299/#281): callers pass a `dict[str,str]`
-# of headers and this module lowercases the names, trims the values, sorts them,
-# and emits the canonical header block + signed-header list itself — no more
-# hand-sorted literal header runs. Numeric wire fields (Content-Length) are
-# rendered internally with `str(len(body))` instead of being threaded through
-# the API as caller-supplied strings. The signer is still proven byte-for-byte
-# against AWS's published vectors in tests/sigv4_vectors.main.zap.
-#
-# Still pre-normalized (documented limits, unchanged from v1): URI path segments
-# and query keys/values must already be URI-safe (no per-segment percent-encode
-# helper yet), and `X-Amz-Date`/the scope date are supplied by the caller
-# (datetime has no SigV4 strftime yet; FRICTION.md #4).
+# PHASE 1 — REAL CANONICALIZATION. The v1 cut of this core predated most of the
+# runtime's string surface and worked AROUND the gaps (pre-sorted literal header
+# runs, pre-encoded URIs/queries, caller-supplied timestamps). Phase 0 landed the
+# missing features, so the signer is now the genuine algorithm:
+#   * CanonicalURI  = url.quote_path(path), double-encoded for every service
+#     except S3 (AWS disables path normalization for S3) — zaplang-io/zap#335.
+#   * CanonicalQuery = url.canonical_query(dict): each key/value percent-encoded
+#     (RFC-3986) and the pairs sorted — zaplang-io/zap#335.
+#   * Canonical headers: names lowercased, values trimmed, set sorted — generic
+#     over a dict[str,str] the caller supplies (zaplang-io/zap#284/#299).
+#   * x-amz-date / credential-scope date are built from `datetime` here
+#     (zaplang-io/zap#286/#338); the SDK can stamp a live request itself. The v1
+#     caller-supplied date env vars are gone (FRICTION #4 resolved).
+#   * The payload hash is SHA-256 of the body (crypto.sha256), or the
+#     x-amz-content-sha256 the caller set (e.g. UNSIGNED-PAYLOAD).
+# The signer is proven byte-for-byte against AWS's published SigV4 vector in
+# tests/sigv4_vectors.main.zap and the pinned service requests in
+# tests/service_signing.main.zap (both re-derived by an independent oracle in
+# tools/verify_vectors.py).
 
 import crypto
 import os
 import tls
+import url
+import datetime
 
 # ---------------------------------------------------------------------------
-# Credentials
+# Credentials (seam — the full provider chain is zaplang-io/zap#341)
 # ---------------------------------------------------------------------------
 
 # Resolved AWS credentials. `session_token` is "" when there is no temporary
 # session (static keys); `has_session` says whether a token is present and is
 # what the signer checks to decide whether to emit the x-amz-security-token
-# header. (String `==` now works, but the explicit flag stays: it is the public
-# shape callers already build against, and it reads clearly.) Mirrors boto3's
-# Credentials object.
+# header. Mirrors boto3's Credentials object. The signer consumes a value of
+# this type through the credentials seam, so #341 (ini/profiles, IMDSv2,
+# container, process, caching) can slot a richer resolver in behind it without
+# touching the signer.
 struct Credentials:
     str access_key
     str secret_key
@@ -45,7 +54,7 @@ struct Credentials:
 # Resolve credentials from the environment (provider #1 of the D-0011 chain:
 # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN). This also
 # covers Lambda, which injects these. The shared-config-file, IMDSv2, and
-# container providers are deferred (D-0011 §5).
+# container providers are deferred to #341.
 def credentials_from_env() -> Credentials:
     auto token = ""
     auto has = False
@@ -80,6 +89,82 @@ def credentials_with_token(
     return credentials(access_key, secret_key, session_token)
 
 # ---------------------------------------------------------------------------
+# Request / Response model
+# ---------------------------------------------------------------------------
+
+# An unsigned AWS request. Per-service code fills this in and hands it to the
+# signer/transport; nothing here is protocol-specific. `query` is a dict of
+# *decoded* key→value pairs (the signer percent-encodes them); `headers` maps
+# the (lowercase) header names to sign → values (host, x-amz-date,
+# x-amz-content-sha256, content-type, x-amz-target, x-amz-meta-*, ...); `body`
+# is the raw payload. `service`/`region` drive both signing scope and endpoint
+# resolution.
+struct Request:
+    str method
+    str service
+    str region
+    str host
+    str path
+    dict[str, str] query
+    dict[str, str] headers
+    str body
+
+# A parsed HTTP response: numeric status, lowercased header map, and the body.
+struct Response:
+    int64 status
+    dict[str, str] headers
+    str body
+
+# Convenience constructor: an empty query/body is the common case (awsJson POSTs
+# and S3 object GET/PUT carry none).
+def new_request(
+    str method,
+    str service,
+    str region,
+    str host,
+    str path,
+    dict[str, str] headers,
+    dict[str, str] query = {},
+    str body = "",
+) -> Request:
+    return Request(
+        method=method,
+        service=service,
+        region=region,
+        host=host,
+        path=path,
+        query=query,
+        headers=headers,
+        body=body,
+    )
+
+# ---------------------------------------------------------------------------
+# SigV4 timestamps (datetime — resolves FRICTION #4)
+# ---------------------------------------------------------------------------
+
+# The two SigV4 time strings: the `x-amz-date` basic timestamp YYYYMMDDTHHMMSSZ
+# and the `YYYYMMDD` credential-scope date.
+struct SigningTime:
+    str amz_date
+    str date_stamp
+
+# Build a SigningTime from explicit strings (used by the pinned tests, which fix
+# AWS's published example timestamp for determinism).
+def signing_time(str amz_date, str date_stamp) -> SigningTime:
+    return SigningTime(amz_date=amz_date, date_stamp=date_stamp)
+
+# The SigV4 timestamps for *now* (UTC), formatted with datetime.strftime
+# (zaplang-io/zap#286). This is what lets the SDK sign a live request on its own
+# — v1 could not reshape datetime.now() and had to read the timestamp from env
+# vars the caller set with `date -u` (FRICTION #4).
+def signing_time_now() -> SigningTime:
+    auto dt = datetime.now()
+    return SigningTime(
+        amz_date=datetime.strftime(dt, "%Y%m%dT%H%M%SZ"),
+        date_stamp=datetime.strftime(dt, "%Y%m%d"),
+    )
+
+# ---------------------------------------------------------------------------
 # Payload hashing
 # ---------------------------------------------------------------------------
 
@@ -93,9 +178,7 @@ def payload_hash(str body) -> str:
 def unsigned_payload() -> str:
     return "UNSIGNED-PAYLOAD"
 
-# The decimal Content-Length of a body. Rendered here with `str(len(body))`
-# (zaplang-io/zap#285) — v1 could not turn an int into a string, so the length
-# used to be threaded through every service API as a caller-supplied string.
+# The decimal Content-Length of a body.
 def content_length(str body) -> str:
     return str(len(body))
 
@@ -103,42 +186,15 @@ def content_length(str body) -> str:
 # Small ordered-string helper
 # ---------------------------------------------------------------------------
 
-# Return a sorted copy of `xs` (ascending, byte/codepoint order via `str <`).
-# Lists expose only append/index/len/iterate — no `.sort()` — so this is a
-# hand-rolled insertion sort. It is written to never index with a negative
-# subscript: Zap's `and`/`or` do NOT short-circuit (FRICTION.md), so a bounds
-# check cannot guard an index in the same boolean expression.
-def sorted_strings(list[str] xs) -> list[str]:
-    list[str] out = []
-    for x in xs:
-        out.append(x)
-    auto n = len(out)
-    auto i = 1
-    while i < n:
-        auto key = out[i]
-        auto j = i - 1
-        auto placed = False
-        while not placed:
-            if j < 0:
-                placed = True
-            else:
-                auto cur = out[j]
-                if key < cur:
-                    out[j + 1] = cur
-                    j = j - 1
-                else:
-                    placed = True
-        out[j + 1] = key
-        i = i + 1
-    return out
-
-# The sorted key list of a string dict (used to canonicalize headers/params
-# deterministically regardless of the dict's own iteration order).
+# The sorted key list of a string dict (ascending byte/codepoint order), used to
+# canonicalize headers deterministically regardless of the dict's own iteration
+# order. v1 hand-rolled an insertion sort because `list` had no `.sort()`; the
+# `sorted` builtin (zaplang-io/zap#336) replaces it.
 def sorted_keys(dict[str, str] d) -> list[str]:
     list[str] ks = []
     for k in d.keys():
         ks.append(k)
-    return sorted_strings(ks)
+    return sorted(ks)
 
 # ---------------------------------------------------------------------------
 # SigV4 signing-key derivation (D-0011 §5)
@@ -162,7 +218,7 @@ def credential_scope(str date_stamp, str region, str service) -> str:
     return date_stamp + "/" + region + "/" + service + "/aws4_request"
 
 # ---------------------------------------------------------------------------
-# Canonical headers / query from dicts (the generic SigV4 canonicalization)
+# Canonical headers / query / URI (the generic SigV4 canonicalization)
 # ---------------------------------------------------------------------------
 
 # One "name:value\n" canonical header line (name lowercase, value trimmed).
@@ -171,8 +227,7 @@ def header_line(str lower_name, str value) -> str:
 
 # The SigV4 canonical header block for a header dict: each header as
 # "name:value\n" with the name lowercased and the value trimmed, the whole block
-# sorted by lowercased name. The caller just builds a dict of the headers it
-# intends to sign; this does the lowercase/trim/sort SigV4 requires.
+# sorted by lowercased name.
 def canonical_headers(dict[str, str] headers) -> str:
     auto block = ""
     for name in sorted_keys(headers):
@@ -192,22 +247,28 @@ def signed_headers(dict[str, str] headers) -> str:
             out = out + ";" + name.lower()
     return out
 
-# The SigV4 canonical query string for a parameter dict: "key=value" pairs,
-# sorted by key, joined with "&". Keys and values must already be URI-encoded
-# (no percent-encode helper yet; see the module header). Returns "" for an empty
-# parameter set.
+# The SigV4 CanonicalQueryString for a parameter dict: each key and value
+# percent-encoded (RFC-3986), the pairs sorted and joined with "&". Delegates to
+# `url.canonical_query` (zaplang-io/zap#335), so reserved characters in values —
+# e.g. a "/" in an S3 `prefix` — are encoded as `%2F`, exactly as botocore does.
+# Returns "" for an empty parameter set.
 def canonical_query(dict[str, str] params) -> str:
-    auto out = ""
-    auto first = True
-    for key in sorted_keys(params):
-        Optional[str] v = params.get(key)
-        auto pair = key + "=" + v.unwrap_or("")
-        if first:
-            out = pair
-            first = False
-        else:
-            out = out + "&" + pair
-    return out
+    return url.canonical_query(params)
+
+# The SigV4 CanonicalURI for a path. `url.quote_path` keeps "/" as the segment
+# separator and percent-encodes everything else; AWS double-encodes the path for
+# every service EXCEPT S3 (which disables path normalization), so non-S3 encodes
+# twice. Resolves the v1 "URI must be pre-encoded" caveat (FRICTION #2).
+def canonical_uri(str path, str service) -> str:
+    auto once = url.quote_path(path)
+    if service == "s3":
+        return once
+    return url.quote_path(once)
+
+# The path as it appears on the HTTP request line: single percent-encoding (the
+# double-encoding above is only for the SigV4 signature, never the wire).
+def wire_path(str path) -> str:
+    return url.quote_path(path)
 
 # ---------------------------------------------------------------------------
 # Canonical request + string-to-sign + signature (D-0011 §5)
@@ -258,53 +319,70 @@ def wire_headers(dict[str, str] headers) -> str:
         out = out + name.lower() + ": " + v.unwrap_or("") + "\r\n"
     return out
 
-# Sign a request described by its headers dict and return ready-to-send
-# HTTP/1.1 text. `headers` maps the (lowercase) header names to sign -> values;
-# the caller includes host, x-amz-date, x-amz-content-sha256, and any
-# service-specific headers (x-amz-target, content-type, x-amz-meta-*, ...). The
-# x-amz-security-token header is injected here when the credentials carry a
-# session. `payload_sha` is the x-amz-content-sha256 value (body hash or
-# UNSIGNED-PAYLOAD) and must match the header. `query` is the canonical query
-# string (from canonical_query) or "". Content-Length is computed from `body`.
-#
-# The wire request carries the signed headers, then Content-Length, then
-# Authorization (Connection: close is added by http_request_text). Only the
-# headers in `headers` are signed.
-def sign_request(
-    Credentials creds,
-    str region,
-    str service,
-    str method,
-    str path,
-    str query,
-    str body,
-    str payload_sha,
-    str amz_date,
-    str date_stamp,
-    dict[str, str] headers,
-) -> str:
-    auto to_sign = headers.copy()
+# Sign `req` with `creds` at the given SigV4 timestamps and return ready-to-send
+# HTTP/1.1 request text. This is the real SigV4 canonicalization (see the module
+# header): the canonical URI and query are percent-encoded here, the header set
+# is lowercased/trimmed/sorted, and the payload hash is the caller's
+# x-amz-content-sha256 (if set) else SHA-256 of the body. The
+# x-amz-security-token header is injected when the credentials carry a session.
+# Only the headers in `req.headers` (plus the injected token) are signed.
+def sign_request(Credentials creds, Request req, str amz_date, str date_stamp) -> str:
+    auto to_sign = req.headers.copy()
     if creds.has_session:
         to_sign["x-amz-security-token"] = creds.session_token
 
+    auto payload_sha = crypto.sha256(req.body)
+    Optional[str] psha = to_sign.get("x-amz-content-sha256")
+    payload_sha = psha.unwrap_or(payload_sha)
+
+    auto canon_uri_str = canonical_uri(req.path, req.service)
+    auto canon_q = url.canonical_query(req.query)
     auto canon = canonical_headers(to_sign)
     auto shead = signed_headers(to_sign)
-    auto creq = canonical_request(method, path, query, canon, shead, payload_sha)
-    auto cred_scope = credential_scope(date_stamp, region, service)
+    auto creq = canonical_request(
+        req.method,
+        canon_uri_str,
+        canon_q,
+        canon,
+        shead,
+        payload_sha,
+    )
+    auto cred_scope = credential_scope(date_stamp, req.region, req.service)
     auto sts = string_to_sign(amz_date, cred_scope, creq)
-    auto key = signing_key(creds.secret_key, date_stamp, region, service)
+    auto key = signing_key(creds.secret_key, date_stamp, req.region, req.service)
     auto signature = sign(key, sts)
     auto auth = authorization_header(creds.access_key, cred_scope, shead, signature)
 
-    auto headers_block = wire_headers(to_sign) + "content-length: " + content_length(body) + "\r\n" + "authorization: " + auth + "\r\n"
-    auto target = path
-    if len(query) > 0:
-        target = path + "?" + query
-    return http_request_text(method, target, headers_block, body)
+    auto headers_block = wire_headers(to_sign) + "content-length: " + content_length(req.body) + "\r\n" + "authorization: " + auth + "\r\n"
+    auto target = wire_path(req.path)
+    if len(canon_q) > 0:
+        target = target + "?" + canon_q
+    return http_request_text(req.method, target, headers_block, req.body)
+
+# Sign `req` using the current UTC time (the usual live path). Equivalent to
+# `sign_request` with `signing_time_now()`.
+def sign_request_now(Credentials creds, Request req) -> str:
+    auto t = signing_time_now()
+    return sign_request(creds, req, t.amz_date, t.date_stamp)
+
+# Build a raw HTTP/1.1 request from its parts. `headers_block` is the already
+# assembled "name: value\r\n"... run (including the signed AWS headers,
+# Content-Length and Authorization); the request line + Connection: close
+# framing + the blank-line/body separator are added here.
+def http_request_text(str method, str path, str headers_block, str body) -> str:
+    return method + " " + path + " HTTP/1.1\r\n" + headers_block + "Connection: close\r\n" + "\r\n" + body
 
 # ---------------------------------------------------------------------------
-# Endpoint / host resolution (D-0011 §6 — simple template, no ruleset engine)
+# Endpoint / region resolution seam (D-0011 §6 — full ruleset is #342)
 # ---------------------------------------------------------------------------
+
+# A resolved endpoint. #342 replaces the template resolvers below with the AWS
+# endpoint-ruleset engine (partitions, FIPS/dualstack, S3 access points, ...)
+# without reshaping this struct or the signer that consumes `host`/`region`.
+struct Endpoint:
+    str host
+    str region
+    str service
 
 # Regional host for a global-style service, e.g. ("dynamodb","us-east-1") ->
 # "dynamodb.us-east-1.amazonaws.com".
@@ -315,6 +393,14 @@ def regional_host(str service, str region) -> str:
 # ("my-bucket","us-east-1") -> "my-bucket.s3.us-east-1.amazonaws.com".
 def s3_virtual_host(str bucket, str region) -> str:
     return bucket + ".s3." + region + ".amazonaws.com"
+
+# Baseline resolver: the templated regional host for a service.
+def resolve_endpoint(str service, str region) -> Endpoint:
+    return Endpoint(host=regional_host(service, region), region=region, service=service)
+
+# Baseline resolver for virtual-hosted-style S3.
+def resolve_s3_endpoint(str bucket, str region) -> Endpoint:
+    return Endpoint(host=s3_virtual_host(bucket, region), region=region, service="s3")
 
 # ---------------------------------------------------------------------------
 # HTTPS transport over the stdlib tls sockets (D-0011 §6)
@@ -335,9 +421,191 @@ def send_https(str host, str raw_request) -> str:
     tls.close_conn(conn)
     return out
 
-# Build a raw HTTP/1.1 request from its parts. `headers_block` is the already
-# assembled "name: value\r\n"... run (including the signed AWS headers,
-# Content-Length and Authorization); the request line + Connection: close
-# framing + the blank-line/body separator are added here.
-def http_request_text(str method, str path, str headers_block, str body) -> str:
-    return method + " " + path + " HTTP/1.1\r\n" + headers_block + "Connection: close\r\n" + "\r\n" + body
+# Parse a raw HTTP/1.1 response into a Response: numeric status from the status
+# line, a lowercased header map, and the body after the blank line. Best-effort
+# and header-only (no chunked-transfer decode yet); enough for error dispatch
+# and retry classification.
+def parse_response(str raw) -> Response:
+    dict[str, str] hdrs = {}
+    auto status = 0
+    auto body = ""
+    auto head = raw
+    auto sep = raw.find("\r\n\r\n")
+    if sep >= 0:
+        head = raw[0:sep]
+        body = raw[sep + 4:len(raw)]
+    auto first = True
+    for line in head.split("\r\n"):
+        if first:
+            first = False
+            auto parts = line.split(" ")
+            if len(parts) >= 2:
+                status = int(parts[1])
+        else:
+            auto colon = line.find(":")
+            if colon >= 0:
+                auto name = line[0:colon].strip().lower()
+                auto value = line[colon + 1:len(line)].strip()
+                hdrs[name] = value
+    return Response(status=status, headers=hdrs, body=body)
+
+# Send a raw request and return the parsed Response.
+def send(str host, str raw_request) -> Response:
+    return parse_response(send_https(host, raw_request))
+
+# ---------------------------------------------------------------------------
+# Retry seam (D-0011 §7 — standard mode with backoff/token-bucket is #343)
+# ---------------------------------------------------------------------------
+
+# A retry policy. The baseline is a fixed cap with no backoff; #343 replaces
+# `should_retry`/`send_with_retry` with standard mode (exponential backoff with
+# jitter, a retry-quota token bucket, and throttling-error classification)
+# behind this same shape.
+struct RetryPolicy:
+    int64 max_attempts
+
+# A policy that never retries (one attempt).
+def no_retry() -> RetryPolicy:
+    return RetryPolicy(max_attempts=1)
+
+# The baseline policy: up to 3 total attempts.
+def default_retry_policy() -> RetryPolicy:
+    return RetryPolicy(max_attempts=3)
+
+# Whether to retry given the 1-based attempt just made and its HTTP status.
+# Baseline: retry on 429 (throttling) and 5xx while attempts remain.
+def should_retry(RetryPolicy p, int64 attempt, int64 status) -> bool:
+    if attempt >= p.max_attempts:
+        return False
+    if status == 429:
+        return True
+    return status >= 500 and status <= 599
+
+# Send `raw_request` under a retry policy, re-sending on a retryable status.
+# (Baseline re-sends the same signed bytes; #343's live retries re-sign with a
+# fresh timestamp.)
+def send_with_retry(RetryPolicy p, str host, str raw_request) -> Response:
+    auto attempt = 1
+    auto resp = send(host, raw_request)
+    while should_retry(p, attempt, resp.status):
+        attempt = attempt + 1
+        resp = send(host, raw_request)
+    return resp
+
+# ---------------------------------------------------------------------------
+# Error dispatch seam
+# ---------------------------------------------------------------------------
+
+# A surfaced AWS error. The full per-service error-shape registry (modeled
+# exceptions, retry-after, etc.) is future work; this is the typed shape error
+# dispatch produces now.
+struct AwsError:
+    str code
+    str message
+    int64 status
+
+# Whether an HTTP status is 2xx success.
+def is_success(int64 status) -> bool:
+    return status >= 200 and status <= 299
+
+# Extract a `"field":"value"` string from a JSON object body (best-effort, no
+# full JSON parse — enough to surface an error code/message). Returns the value
+# with its surrounding quotes removed, or none.
+def json_string_field(str body, str field) -> Optional[str]:
+    auto needle = "\"" + field + "\""
+    auto k = body.find(needle)
+    if k < 0:
+        return Optional.None
+    auto rest = body[k + len(needle):len(body)]
+    auto c = rest.find(":")
+    if c < 0:
+        return Optional.None
+    auto after = rest[c + 1:len(rest)]
+    auto q1 = after.find("\"")
+    if q1 < 0:
+        return Optional.None
+    auto tail = after[q1 + 1:len(after)]
+    auto q2 = tail.find("\"")
+    if q2 < 0:
+        return Optional.None
+    return Optional.Some(tail[0:q2])
+
+# Extract the text of the first <tag>...</tag> element (best-effort; rest-xml
+# error shapes). Returns none if the element is absent.
+def xml_element_text(str body, str tag) -> Optional[str]:
+    auto open_tag = "<" + tag + ">"
+    auto close_tag = "</" + tag + ">"
+    auto a = body.find(open_tag)
+    if a < 0:
+        return Optional.None
+    auto start = a + len(open_tag)
+    auto rest = body[start:len(body)]
+    auto b = rest.find(close_tag)
+    if b < 0:
+        return Optional.None
+    return Optional.Some(rest[0:b])
+
+# Parse an error out of a response. Baseline: no error on 2xx; for awsJson read
+# `__type`/`code` + `message`/`Message`, for rest-xml read `<Code>`/`<Message>`.
+# Returns none when the status is success.
+def parse_error(Response resp) -> Optional[AwsError]:
+    if is_success(resp.status):
+        return Optional.None
+    auto code = ""
+    auto message = ""
+    Optional[str] jtype = json_string_field(resp.body, "__type")
+    code = jtype.unwrap_or(code)
+    Optional[str] jcode = json_string_field(resp.body, "code")
+    code = jcode.unwrap_or(code)
+    Optional[str] jmsg_lower = json_string_field(resp.body, "message")
+    message = jmsg_lower.unwrap_or(message)
+    Optional[str] jmsg_upper = json_string_field(resp.body, "Message")
+    message = jmsg_upper.unwrap_or(message)
+    Optional[str] xcode = xml_element_text(resp.body, "Code")
+    code = xcode.unwrap_or(code)
+    Optional[str] xmsg = xml_element_text(resp.body, "Message")
+    message = xmsg.unwrap_or(message)
+    return Optional.Some(AwsError(code=code, message=message, status=resp.status))
+
+# ---------------------------------------------------------------------------
+# Pagination hooks seam
+# ---------------------------------------------------------------------------
+
+# One step of a paginated listing: whether another page exists and the
+# continuation token to carry into the next request. A paginator loops —
+# sign+send, read the token, apply it to the next request — until `has_more` is
+# false. Per-service code supplies the token field/element names and where the
+# token goes on the next request; the full generated paginators are future work.
+struct NextPage:
+    bool has_more
+    str token
+
+# Read a continuation token from an awsJson body by field name (e.g.
+# "NextToken"). `has_more` is true when a non-empty token is present.
+def next_page_json(str body, str field) -> NextPage:
+    Optional[str] t = json_string_field(body, field)
+    auto tok = t.unwrap_or("")
+    return NextPage(has_more=len(tok) > 0, token=tok)
+
+# Read a continuation token from a rest-xml body by element name (e.g.
+# "NextContinuationToken").
+def next_page_xml(str body, str tag) -> NextPage:
+    Optional[str] t = xml_element_text(body, tag)
+    auto tok = t.unwrap_or("")
+    return NextPage(has_more=len(tok) > 0, token=tok)
+
+# Return a copy of `req` with a query parameter set — the common way to carry a
+# continuation token into the next page of a REST listing.
+def with_query_param(Request req, str param, str value) -> Request:
+    auto q = req.query.copy()
+    q[param] = value
+    return Request(
+        method=req.method,
+        service=req.service,
+        region=req.region,
+        host=req.host,
+        path=req.path,
+        query=q,
+        headers=req.headers,
+        body=req.body,
+    )
