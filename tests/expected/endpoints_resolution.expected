@@ -1,0 +1,33 @@
+## partitions
+us-east-1 -> aws
+eu-west-1 -> aws
+cn-north-1 -> aws-cn
+us-gov-west-1 -> aws-us-gov
+## service hosts
+dynamodb/us-east-1 -> dynamodb.us-east-1.amazonaws.com
+dynamodb/us-east-1 fips -> dynamodb-fips.us-east-1.amazonaws.com
+dynamodb/us-east-1 dualstack -> dynamodb.us-east-1.api.aws
+dynamodb/us-east-1 fips+dualstack -> dynamodb-fips.us-east-1.api.aws
+ec2/cn-north-1 -> ec2.cn-north-1.amazonaws.com.cn
+logs/cn-north-1 dualstack -> logs.cn-north-1.api.amazonwebservices.com.cn
+sqs/us-gov-west-1 fips -> sqs-fips.us-gov-west-1.amazonaws.com
+## s3 addressing
+my-bucket/us-east-1 -> my-bucket.s3.us-east-1.amazonaws.com [virtual]
+my-bucket/us-east-1 dualstack -> my-bucket.s3.dualstack.us-east-1.amazonaws.com [virtual]
+my-bucket/us-east-1 fips -> my-bucket.s3-fips.us-east-1.amazonaws.com [virtual]
+my-bucket/us-east-1 fips+dualstack -> my-bucket.s3-fips.dualstack.us-east-1.amazonaws.com [virtual]
+my-bucket/us-east-1 global -> my-bucket.s3.amazonaws.com [virtual]
+my-bucket/us-east-1 global+dualstack -> my-bucket.s3.dualstack.us-east-1.amazonaws.com [virtual]
+my-bucket/eu-west-1 -> my-bucket.s3.eu-west-1.amazonaws.com [virtual]
+my-bucket/cn-north-1 -> my-bucket.s3.cn-north-1.amazonaws.com.cn [virtual]
+my-bucket/us-gov-west-1 fips -> my-bucket.s3-fips.us-gov-west-1.amazonaws.com [virtual]
+my-bucket/us-east-1 force-path -> s3.us-east-1.amazonaws.com [path]
+my-bucket/us-east-1 force-path+global -> s3.amazonaws.com [path]
+dotted my.bucket/us-east-1 -> s3.us-east-1.amazonaws.com [path]
+upper My-Bucket/us-east-1 -> s3.us-east-1.amazonaws.com [path]
+short ab/us-east-1 -> s3.us-east-1.amazonaws.com [path]
+## legacy shims
+regional_host -> dynamodb.us-east-1.amazonaws.com
+s3_virtual_host -> my-bucket.s3.us-east-1.amazonaws.com
+s3_virtual_host_for -> my-bucket.s3.us-east-1.amazonaws.com
+s3_service_host -> s3.us-east-1.amazonaws.com

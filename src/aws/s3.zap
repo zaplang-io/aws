@@ -20,16 +20,35 @@
 # is resolved). "/" inside a key stays a separator, matching S3's behavior.
 
 # Virtual-hosted-style host for a bucket: <bucket>.s3.<region>.amazonaws.com.
+# Thin shim over aws.endpoints (default options, always bucket-in-host); the
+# resolver carries partition/FIPS/dualstack/global and the path-vs-virtual
+# choice (see `resolve_s3`).
 def s3_host(str bucket, str region) -> str:
-    return bucket + ".s3." + region + ".amazonaws.com"
+    return s3_virtual_host_for(bucket, region, default_s3_options())
 
 # Regional S3 endpoint host (path-style / service-level ops): s3.<region>...
+# Thin shim over aws.endpoints `s3_service_host`.
 def s3_regional_host(str region) -> str:
-    return "s3." + region + ".amazonaws.com"
+    return s3_service_host(region, default_s3_options())
 
 # Canonical object-key path: "/" + key.
 def s3_key_path(str key) -> str:
     return "/" + key
+
+# The request path for an object under a resolved S3 endpoint: the bucket path
+# prefix (empty for virtual-hosted, "/<bucket>" for path-style) followed by the
+# "/<key>" object path. For virtual-hosted buckets this is just "/<key>", so the
+# signed request is unchanged from the v1 virtual-hosted-only path.
+def s3_object_path(S3Endpoint ep, str bucket, str key) -> str:
+    return s3_path_prefix(ep, bucket) + s3_key_path(key)
+
+# The request path for a bucket-level operation (e.g. ListObjectsV2) under a
+# resolved S3 endpoint: "/<bucket>" for path-style, else "/".
+def s3_bucket_path(S3Endpoint ep, str bucket) -> str:
+    auto prefix = s3_path_prefix(ep, bucket)
+    if len(prefix) == 0:
+        return "/"
+    return prefix
 
 # The base signed header set for an S3 request: host, the payload hash, and the
 # date. Callers add content-type / x-amz-meta-* as needed.
@@ -49,7 +68,8 @@ def get_object_request(
     str amz_date,
     str date_stamp,
 ) -> str:
-    auto host = s3_host(bucket, region)
+    auto ep = resolve_s3(bucket, region, default_s3_options())
+    auto host = ep.host
     auto sha = payload_hash("")
     auto headers = s3_base_headers(host, sha, amz_date)
     dict[str, str] query = {}
@@ -58,7 +78,7 @@ def get_object_request(
         service="s3",
         region=region,
         host=host,
-        path=s3_key_path(key),
+        path=s3_object_path(ep, bucket, key),
         query=query,
         headers=headers,
         body="",
@@ -79,7 +99,8 @@ def put_object_request(
     str content_type = "application/octet-stream",
     dict[str, str] metadata = {},
 ) -> str:
-    auto host = s3_host(bucket, region)
+    auto ep = resolve_s3(bucket, region, default_s3_options())
+    auto host = ep.host
     auto sha = payload_hash(body)
     auto headers = s3_base_headers(host, sha, amz_date)
     headers["content-type"] = content_type
@@ -92,7 +113,7 @@ def put_object_request(
         service="s3",
         region=region,
         host=host,
-        path=s3_key_path(key),
+        path=s3_object_path(ep, bucket, key),
         query=query,
         headers=headers,
         body=body,
@@ -112,7 +133,8 @@ def list_objects_v2_request(
     str prefix = "",
     int64 max_keys = 0,
 ) -> str:
-    auto host = s3_host(bucket, region)
+    auto ep = resolve_s3(bucket, region, default_s3_options())
+    auto host = ep.host
     auto sha = payload_hash("")
     dict[str, str] params = {}
     params["list-type"] = "2"
@@ -126,7 +148,7 @@ def list_objects_v2_request(
         service="s3",
         region=region,
         host=host,
-        path="/",
+        path=s3_bucket_path(ep, bucket),
         query=params,
         headers=headers,
         body="",

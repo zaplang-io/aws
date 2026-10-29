@@ -1,0 +1,29 @@
+== classification ==
+429/'' -> 2
+503/SlowDown -> 2
+500/'' -> 1
+0/'' -> 1
+400/ThrottlingException -> 2
+403/AccessDenied -> 0
+404/NoSuchKey -> 0
+400/RequestTimeout -> 1
+retryable 500=True 403=False
+== backoff ==
+caps 1 2 4 8 16 20 20
+deterministic True
+in-bounds True
+== quota ==
+start 500
+acquire5 True bal 495
+acquire10 True bal 485
+release5 bal 490
+release100-capped bal 500
+small acquire5 True bal 2
+small acquire5 False bal 2
+== loop ==
+clean: attempts 1 status 200 exh False bal 500
+transient-then-ok: attempts 2 status 200 exh False bal 500
+throttle-then-ok: attempts 2 status 200 exh False
+exhaust-attempts: attempts 3 status 503 exh True code ServiceUnavailable bal 490
+permanent: attempts 1 status 403 exh False code AccessDenied
+quota-drain: attempts 2 exh True bal 2
