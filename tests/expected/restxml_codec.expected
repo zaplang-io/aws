@@ -1,0 +1,30 @@
+### rest-xml serialize (namespace+attribute+nested+wrapped+flattened) ###
+<PutThingRequest xmlns="http://example.amazonaws.com/doc/2021-01-01/" version="2"><Name>gadget</Name><Owner><Id>o-1</Id></Owner><Tags><Tag>red</Tag><Tag>blue</Tag></Tags><Alias>a1</Alias><Alias>a2</Alias></PutThingRequest>
+### rest-xml PutThing (S3, signed) ###
+PUT /thing/a%20b HTTP/1.1
+content-type: application/xml
+host: my-bucket.s3.us-east-1.amazonaws.com
+x-amz-content-sha256: 374903058bb985ffecd2914b7fb3af3d848bd9084349f712b7b96edfe29a4aed
+x-amz-date: 20150830T123600Z
+content-length: 222
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, Signature=82a509e2d523774dd42cfa17056b5bf1936b1d3a697ec2eaf2271f3d4a435664
+Connection: close
+
+<PutThingRequest xmlns="http://example.amazonaws.com/doc/2021-01-01/" version="2"><Name>gadget</Name><Owner><Id>o-1</Id></Owner><Tags><Tag>red</Tag><Tag>blue</Tag></Tags><Alias>a1</Alias><Alias>a2</Alias></PutThingRequest>
+### rest-xml prefixed namespace + escaping ###
+<ns:ChangeSet xmlns:ns="urn:aws:route53"><Comment>a &lt; b &amp; c &gt; d</Comment></ns:ChangeSet>
+### rest-xml parse round-trip ###
+Name=gadget
+version=2
+Owner.Id=o-1
+tags=2:red,blue
+alias=2:a1,a2
+roundtrip-ok
+### rest-xml error dispatch ###
+code=NoSuchKey
+message=The specified key does not exist.
+status=404
+code2=AccessDenied
+message2=denied
+status2=403
+ok-no-error
