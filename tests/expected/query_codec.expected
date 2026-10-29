@@ -1,0 +1,30 @@
+### query serialize (scalar+nested+wrapped-list+flat-list+map) ###
+Action=CreateThing&Version=2010-05-08&Name=my%20thing&Count=3&Owner.Id=o-1&Tags.member.1=red&Tags.member.2=blue&Alias.1=a1&Alias.2=a2&Attrs.entry.1.key=k1&Attrs.entry.1.value=v1
+### ec2 serialize (capitalized + flat list) ###
+Action=RunThings&Version=2016-11-15&ImageId=ami-1&SecurityGroup.1=sg-1&SecurityGroup.2=sg-2
+### query CreateThing (IAM, signed) ###
+POST / HTTP/1.1
+content-type: application/x-www-form-urlencoded; charset=utf-8
+host: iam.amazonaws.com
+x-amz-content-sha256: d5c09aec361dd8ef43505118becdab3c78e2c7ab95182f291416d6a0bd1693f3
+x-amz-date: 20150830T123600Z
+content-length: 177
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, Signature=43637e2217b7cc93f4b09b3deae1c96af2081579ea00d5a3b2c4fe09a715ea49
+Connection: close
+
+Action=CreateThing&Version=2010-05-08&Name=my%20thing&Count=3&Owner.Id=o-1&Tags.member.1=red&Tags.member.2=blue&Alias.1=a1&Alias.2=a2&Attrs.entry.1.key=k1&Attrs.entry.1.value=v1
+### query response parse ###
+Id=t-1
+tags=2:red,blue
+requestId=req-123
+### ec2 response parse ###
+instanceId=i-1
+requestId=ec2-req-9
+### query error dispatch ###
+code=InvalidParameterValue
+message=bad param
+status=400
+code2=InvalidInstanceID.NotFound
+message2=no instance
+status2=400
+ok-no-error

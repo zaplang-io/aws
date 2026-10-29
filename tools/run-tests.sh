@@ -57,6 +57,10 @@ run_case restxml_codec \
     src/aws/core.zap src/aws/endpoints.zap src/aws/binding.zap src/aws/restxml.zap \
     tests/restxml_codec.main.zap
 
+run_case query_codec \
+    src/aws/core.zap src/aws/endpoints.zap src/aws/query.zap \
+    tests/query_codec.main.zap
+
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2
     exit 1
