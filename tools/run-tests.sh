@@ -37,6 +37,8 @@ run_case sigv4_vectors \
 run_case service_signing \
     src/aws/core.zap src/aws/endpoints.zap src/aws/dynamodb.zap src/aws/s3.zap \
     tests/service_signing.main.zap
+run_case retry \
+    src/aws/core.zap src/aws/endpoints.zap src/aws/retry.zap tests/retry.main.zap
 run_case endpoints_resolution \
     src/aws/core.zap src/aws/endpoints.zap tests/endpoints_resolution.main.zap
 
