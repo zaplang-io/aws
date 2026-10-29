@@ -33,7 +33,8 @@ def main():
 
     # --- 1. XML document body: namespace + attribute + nested + wrapped + flattened
     print("### rest-xml serialize (namespace+attribute+nested+wrapped+flattened) ###")
-    auto root = rest_xml_root_ns("PutThingRequest", "http://example.amazonaws.com/doc/2021-01-01/")
+    auto ns = "http://example.amazonaws.com/doc/2021-01-01/"
+    auto root = rest_xml_root_ns("PutThingRequest", ns)
     rest_xml_attribute(root, "version", "2")
     rest_xml_scalar(root, "Name", "gadget")
     auto owner = rest_xml_struct(root, "Owner")
@@ -74,7 +75,8 @@ def main():
 
     # --- 4. parse round-trip: read members back with the inverse helpers -------
     print("### rest-xml parse round-trip ###")
-    auto resp = parse_response("HTTP/1.1 200 OK\r\n" + "content-type: application/xml\r\n" + "\r\n" + body)
+    auto ok_raw = "HTTP/1.1 200 OK\r\n" + "content-type: application/xml\r\n" + "\r\n" + body
+    auto resp = parse_response(ok_raw)
     auto doc = rest_xml_parse(resp)
     print("Name=" + doc.find("Name").unwrap().get_text())
     print("version=" + doc.get_attr("version").unwrap())
