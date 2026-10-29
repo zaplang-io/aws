@@ -454,43 +454,15 @@ def send(str host, str raw_request) -> Response:
     return parse_response(send_https(host, raw_request))
 
 # ---------------------------------------------------------------------------
-# Retry seam (D-0011 §7 — standard mode with backoff/token-bucket is #343)
+# Retry seam (D-0011 §7)
 # ---------------------------------------------------------------------------
-
-# A retry policy. The baseline is a fixed cap with no backoff; #343 replaces
-# `should_retry`/`send_with_retry` with standard mode (exponential backoff with
-# jitter, a retry-quota token bucket, and throttling-error classification)
-# behind this same shape.
-struct RetryPolicy:
-    int64 max_attempts
-
-# A policy that never retries (one attempt).
-def no_retry() -> RetryPolicy:
-    return RetryPolicy(max_attempts=1)
-
-# The baseline policy: up to 3 total attempts.
-def default_retry_policy() -> RetryPolicy:
-    return RetryPolicy(max_attempts=3)
-
-# Whether to retry given the 1-based attempt just made and its HTTP status.
-# Baseline: retry on 429 (throttling) and 5xx while attempts remain.
-def should_retry(RetryPolicy p, int64 attempt, int64 status) -> bool:
-    if attempt >= p.max_attempts:
-        return False
-    if status == 429:
-        return True
-    return status >= 500 and status <= 599
-
-# Send `raw_request` under a retry policy, re-sending on a retryable status.
-# (Baseline re-sends the same signed bytes; #343's live retries re-sign with a
-# fresh timestamp.)
-def send_with_retry(RetryPolicy p, str host, str raw_request) -> Response:
-    auto attempt = 1
-    auto resp = send(host, raw_request)
-    while should_retry(p, attempt, resp.status):
-        attempt = attempt + 1
-        resp = send(host, raw_request)
-    return resp
+#
+# AWS "standard" retry mode — error classification, exponential backoff with
+# full jitter, and a retry-quota token bucket wrapped around the sign+send path
+# — lives in aws.retry (`retry_send` / `send_request_with_retry`, zaplang-io/
+# zap#343), bundled after this module. The v1 baseline (a fixed attempt cap with
+# no backoff) that used to sit here has been retired in its favor. Callers that
+# want no retries keep using `send` / `send_https` directly.
 
 # ---------------------------------------------------------------------------
 # Error dispatch seam

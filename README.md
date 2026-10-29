@@ -36,7 +36,7 @@ is [D-0011](https://github.com/zaplang-io/zap/blob/main/design/0011-aws-sdk.md).
   runtime; `send`/`parse_response` return a parsed `Response`.
 - **Seams for the later phases**: a credentials seam (env + static now; full
   provider chain #341), endpoint/region resolution (regional/virtual-host
-  template now; ruleset engine #342), retry (fixed cap now; standard mode #343),
+  template now; ruleset engine #342), retry (standard mode — see `aws.retry`),
   error dispatch (`parse_error` → typed `AwsError`), and pagination hooks.
 - **Credentials** from the environment (`AWS_ACCESS_KEY_ID` /
   `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`) — the provider that also covers
@@ -154,8 +154,9 @@ dict-based items) — see FRICTION.md "Resolved in Phase 1". What remains:
   container, and process providers are deferred to the credential seam (#341).
 - Endpoint resolution is the regional/virtual-host template; the full
   endpoint-ruleset engine (partitions, FIPS/dualstack, access points) is #342.
-- Retry is a fixed small cap with no backoff; standard mode (token bucket,
-  exponential backoff + jitter) is #343.
+- Retry is AWS "standard" mode (`aws.retry`): throttling/transient error
+  classification, exponential backoff with full jitter, and a per-client
+  retry-quota token bucket, wrapped around the sign+send path by `retry_send`.
 - Error dispatch and pagination are minimal baselines over the seams; a full
   per-service error-shape registry and generated paginators are follow-ups.
 - Response parsing is status + headers + body; no chunked-transfer decode, and
