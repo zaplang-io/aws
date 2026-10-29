@@ -1,18 +1,23 @@
-# aws.dynamodb — DynamoDB client, thin vertical v1 (awsJson 1.0 protocol).
+# aws.dynamodb — DynamoDB client (awsJson 1.0 protocol).
 #
 # Depends on aws.core (bundled ahead of this file; see FRICTION.md #1 on why
-# there is no `import aws.core` yet). DynamoDB is the cleanest first service for
-# the thin vertical: the awsJson protocol puts everything in the body, the path
-# is always "/", there is no query string, and the header set is fixed — so no
-# percent-encoding or runtime header sorting is needed (both unavailable today).
+# there is no `import aws.core` yet). DynamoDB is the cleanest service for the
+# hand-written vertical: the awsJson protocol puts everything in the body, the
+# path is always "/", there is no query string, and the signed header set is
+# small.
 #
-# v1 operations: get_item, put_item. Requests are signed with SigV4 and returned
-# as ready-to-send HTTP/1.1 text; aws.core.send_https delivers them.
+# ERGONOMIC REWRITE: items and keys are now ordinary `dict[str, str]` maps built
+# at the call site and turned into AttributeValue JSON by dict iteration
+# (zaplang-io/zap#299) — v1 forced the caller to pre-build each `{"S":...}`
+# fragment by hand. Attribute names are emitted in sorted order so the wire body
+# is deterministic regardless of dict iteration order. Numeric ("N") attributes
+# are passed as a second dict and no longer need a separate hand-written builder.
 #
-# AttributeValue JSON is built by concatenation (the runtime has no JSON string
-# escaping / int->str yet), so string attribute values must not contain
-# characters needing JSON escaping. Richer item building waits on the json
-# derive + string work (FRICTION.md).
+# JSON string values must still not contain characters needing JSON escaping
+# (no escaping pass yet); numbers are passed as their decimal digits.
+#
+# v1 operations: get_item, put_item. Requests are SigV4-signed via
+# aws.core.sign_request and returned as ready-to-send HTTP/1.1 text.
 
 # awsJson 1.0 content type and the DynamoDB target prefix (API version).
 def ddb_content_type() -> str:
@@ -21,130 +26,121 @@ def ddb_content_type() -> str:
 def ddb_target(str op) -> str:
     return "DynamoDB_20120810." + op
 
-# --- request body builders (string-keyed AttributeValues) ------------------
+# --- AttributeValue JSON (built from dicts) --------------------------------
 
-# {"name":{"S":"value"}} — one string ("S") attribute fragment.
+# One `"name":{"S":"value"}` string-attribute fragment.
 def ddb_attr_s(str name, str value) -> str:
     return "\"" + name + "\":{\"S\":\"" + value + "\"}"
 
-# {"name":{"N":"value"}} — one number ("N") attribute fragment (value is the
-# decimal digits as a string, since there is no int->str at runtime).
+# One `"name":{"N":"value"}` number-attribute fragment (value is the decimal
+# digits).
 def ddb_attr_n(str name, str value) -> str:
     return "\"" + name + "\":{\"N\":\"" + value + "\"}"
 
-# GetItem body: {"TableName":"T","Key":{"<key_name>":{"S":"<key_value>"}}}.
-def get_item_body(str table, str key_name, str key_value) -> str:
-    return (
-        "{\"TableName\":\""
-        + table
-        + "\",\"Key\":{"
-        + ddb_attr_s(key_name, key_value)
-        + "}}"
-    )
+# Render an attribute map as the comma-joined body of a JSON object (no
+# surrounding braces): string attributes from `strings`, number attributes from
+# `numbers`. Names across both maps are emitted in a single sorted order, so the
+# output is deterministic. A name present in both maps is emitted as its string
+# form (callers should not overload a name across types).
+def ddb_attributes(dict[str, str] strings, dict[str, str] numbers) -> str:
+    list[str] names = []
+    for k in strings.keys():
+        names.append(k)
+    for k in numbers.keys():
+        if not k in strings:
+            names.append(k)
+    auto out = ""
+    auto first = True
+    for name in sorted_strings(names):
+        auto frag = ""
+        if name in strings:
+            Optional[str] sv = strings.get(name)
+            frag = ddb_attr_s(name, sv.unwrap_or(""))
+        else:
+            Optional[str] nv = numbers.get(name)
+            frag = ddb_attr_n(name, nv.unwrap_or(""))
+        if first:
+            out = frag
+            first = False
+        else:
+            out = out + "," + frag
+    return out
 
-# PutItem body from a pre-built item object body (the "{...}" of attribute
-# fragments, joined with commas by the caller):
-#   {"TableName":"T","Item":{<item_attrs>}}
-def put_item_body(str table, str item_attrs) -> str:
-    return (
-        "{\"TableName\":\""
-        + table
-        + "\",\"Item\":{"
-        + item_attrs
-        + "}}"
-    )
+# GetItem body: {"TableName":"T","Key":{<key attrs>}}.
+def get_item_body(str table, dict[str, str] key) -> str:
+    dict[str, str] no_numbers = {}
+    return "{\"TableName\":\"" + table + "\",\"Key\":{" + ddb_attributes(key, no_numbers) + "}}"
 
-# --- SigV4-signed request assembly -----------------------------------------
+# PutItem body: {"TableName":"T","Item":{<item attrs>}}.
+def put_item_body(str table, dict[str, str] strings, dict[str, str] numbers) -> str:
+    return "{\"TableName\":\"" + table + "\",\"Item\":{" + ddb_attributes(strings, numbers) + "}}"
 
-# Sign a DynamoDB request and return the full HTTP/1.1 request text, ready for
-# aws.core.send_https(host, text). `op` is e.g. "GetItem"/"PutItem", `body` the
-# awsJson body, `amz_date` the YYYYMMDDTHHMMSSZ timestamp, `date_stamp` the
-# YYYYMMDD scope date, and `content_length` len(body) rendered as a decimal
-# string (threaded in because the runtime has no int->str; FRICTION.md).
-def ddb_signed_request(
-    Credentials creds,
-    str region,
-    str op,
-    str body,
-    str amz_date,
-    str date_stamp,
-    str content_length,
-) -> str:
-    auto host = regional_host("dynamodb", region)
-    auto body_sha = payload_hash(body)
-    auto ctype = ddb_content_type()
-    auto target = ddb_target(op)
+# --- operations ------------------------------------------------------------
 
-    # Canonical headers MUST be lowercase, newline-terminated, and sorted by
-    # name. We write them in that order by hand: content-type, host,
-    # x-amz-content-sha256, x-amz-date, [x-amz-security-token,] x-amz-target.
-    auto canon_headers = ""
-    auto signed_headers = ""
-    if creds.has_session:
-        canon_headers = (
-            header_line("content-type", ctype)
-            + header_line("host", host)
-            + header_line("x-amz-content-sha256", body_sha)
-            + header_line("x-amz-date", amz_date)
-            + header_line("x-amz-security-token", creds.session_token)
-            + header_line("x-amz-target", target)
-        )
-        signed_headers = (
-            "content-type;host;x-amz-content-sha256;x-amz-date;"
-            + "x-amz-security-token;x-amz-target"
-        )
-    else:
-        canon_headers = (
-            header_line("content-type", ctype)
-            + header_line("host", host)
-            + header_line("x-amz-content-sha256", body_sha)
-            + header_line("x-amz-date", amz_date)
-            + header_line("x-amz-target", target)
-        )
-        signed_headers = (
-            "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target"
-        )
+# The signed header set shared by DynamoDB operations (awsJson, fixed path "/").
+def ddb_headers(str host, str body_sha, str amz_date, str op) -> dict[str, str]:
+    dict[str, str] h = {}
+    h["content-type"] = ddb_content_type()
+    h["host"] = host
+    h["x-amz-content-sha256"] = body_sha
+    h["x-amz-date"] = amz_date
+    h["x-amz-target"] = ddb_target(op)
+    return h
 
-    auto creq = canonical_request(
-        "POST", "/", "", canon_headers, signed_headers, body_sha
-    )
-    auto cred_scope = credential_scope(date_stamp, region, "dynamodb")
-    auto sts = string_to_sign(amz_date, cred_scope, creq)
-    auto key = signing_key(creds.secret_key, date_stamp, region, "dynamodb")
-    auto signature = sign(key, sts)
-    auto auth = authorization_header(
-        creds.access_key, cred_scope, signed_headers, signature
-    )
-
-    # Wire headers (casing is cosmetic; AWS lowercases for verification). The
-    # security-token header is included on the wire only when present.
-    auto token_header = ""
-    if creds.has_session:
-        token_header = "X-Amz-Security-Token: " + creds.session_token + "\r\n"
-    auto headers_block = (
-        "Host: " + host + "\r\n"
-        + "Content-Type: " + ctype + "\r\n"
-        + "X-Amz-Date: " + amz_date + "\r\n"
-        + "X-Amz-Content-Sha256: " + body_sha + "\r\n"
-        + "X-Amz-Target: " + target + "\r\n"
-        + "Content-Length: " + content_length + "\r\n"
-        + token_header
-        + "Authorization: " + auth + "\r\n"
-    )
-    return http_request_text("POST", "/", headers_block, body)
-
-# Convenience: build + sign a GetItem request in one call.
+# GetItem. `key` is the primary key as an attribute map, e.g. {"id": "alice"}
+# (reads like boto3's `Key=...`). Returns ready-to-send HTTP/1.1 request text.
 def get_item_request(
     Credentials creds,
     str region,
     str table,
-    str key_name,
-    str key_value,
+    dict[str, str] key,
     str amz_date,
     str date_stamp,
-    str content_length,
 ) -> str:
-    auto body = get_item_body(table, key_name, key_value)
-    return ddb_signed_request(
-        creds, region, "GetItem", body, amz_date, date_stamp, content_length
+    auto host = regional_host("dynamodb", region)
+    auto body = get_item_body(table, key)
+    auto body_sha = payload_hash(body)
+    auto headers = ddb_headers(host, body_sha, amz_date, "GetItem")
+    return sign_request(
+        creds,
+        region,
+        "dynamodb",
+        "POST",
+        "/",
+        "",
+        body,
+        body_sha,
+        amz_date,
+        date_stamp,
+        headers,
+    )
+
+# PutItem. `item` is the string attributes as a map (e.g. {"id": "alice",
+# "name": "Alice"}); pass `numbers` for numeric ("N") attributes
+# (e.g. {"age": "30"}). Returns ready-to-send HTTP/1.1 request text.
+def put_item_request(
+    Credentials creds,
+    str region,
+    str table,
+    dict[str, str] item,
+    str amz_date,
+    str date_stamp,
+    dict[str, str] numbers = {},
+) -> str:
+    auto host = regional_host("dynamodb", region)
+    auto body = put_item_body(table, item, numbers)
+    auto body_sha = payload_hash(body)
+    auto headers = ddb_headers(host, body_sha, amz_date, "PutItem")
+    return sign_request(
+        creds,
+        region,
+        "dynamodb",
+        "POST",
+        "/",
+        "",
+        body,
+        body_sha,
+        amz_date,
+        date_stamp,
+        headers,
     )

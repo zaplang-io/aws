@@ -21,7 +21,53 @@ time.
   keyword-arg construction, `@derive(Json)` + `Optional[T]`, and `list.append` /
   indexing / `for x in list` all behaved as expected.
 
-## 1. No Zap-to-Zap package / module imports  — blocks the package shape
+## Resolved since v1 (this rewrite)
+
+The language moved fast; several of the biggest v1 blockers are now fixed, and
+this rewrite adopts them. Kept as a record of what the dogfooding surfaced and
+what unblocked it.
+
+- **Opaque strings (was #2) — RESOLVED** by zaplang-io/zap#284/#285. `str`
+  indexing/slicing/`==`/`<`, `for c in s`, methods (`lower`/`strip`/`split`/…),
+  `ord`/`chr`, `str(int)`, f-strings and `format()` all work now. SigV4
+  canonicalization is therefore **generic**: `aws.core.canonical_headers` takes a
+  `dict[str,str]`, lowercases names, trims values and sorts — no hand-sorted
+  literal header runs. `credentials()` derives `has_session` from the token
+  (string `==` works), though the `Credentials.has_session` field stays as the
+  public shape.
+- **No `int→str` / f-strings (was #3) — RESOLVED** by zaplang-io/zap#285.
+  `Content-Length` is now `str(len(body))` inside the SDK; the
+  `content_length: str` parameter that used to be threaded through every
+  operation (and hard-coded in examples) is gone.
+- **Default + keyword arguments — LANDED** (zaplang-io/zap#298). Operations take
+  keyword args with defaults, so S3 `put_object(..., content_type=...,
+  metadata={...})` and `list_objects_v2(..., prefix=..., max_keys=...)` read like
+  boto3.
+- **Dict iteration / membership / `get` — LANDED** (zaplang-io/zap#299, #281).
+  Headers, query params, metadata and DynamoDB keys/items are ordinary dicts,
+  iterated to build canonical requests; `dict.get(k) -> Optional[V]` is used for
+  safe probing.
+- **Module imports (#1) — LANDED but not yet adopted here**, see below.
+
+### New friction found during this rewrite
+
+- **`and` / `or` do NOT short-circuit.** Both operands are always evaluated, so
+  a bounds check cannot guard an index in the same expression
+  (`while j >= 0 and key < out[j]` faults with `index -1` when `j < 0`). The
+  insertion sort in `aws.core.sorted_strings` is written around this. This is a
+  surprising, easy-to-miss correctness trap; worth a language decision.
+- **No keyword-only marker.** A bare `*` separator in a parameter list
+  (`def f(a, *, b=1)`) does not parse; optional params are just trailing
+  defaulted positionals. Put all optional/keyword params last.
+- **`list` has no `.sort()`** (only `append` + index + `len` + iterate), hence
+  the hand-rolled sort for canonical ordering.
+- **`dict.get` needs an annotated sink.** `Optional[str] v = d.get(k)` works;
+  the inline `d.get(k).unwrap_or(...)` fails to resolve `Optional[V]` in mono
+  (documented in zaplang-io/zap#281).
+- **f-string fields can't nest the field quote.** `f"{d.get(\"k\")}"` fails to
+  lex; bind to a local first. (Already noted upstream in #285.)
+
+## 1. No Zap-to-Zap package / module imports  — now LANDED (#283), not yet adopted
 
 `import` resolves only stdlib modules and `import python`; project mode compiles
 exactly one entry file (`src/main.zap`). There is no way for one `.zap` file to
@@ -36,13 +82,28 @@ use defs from another, so a multi-module package cannot be built or imported.
 `aws-s3`/`aws-dynamodb` packages depending on it) is not expressible. The whole
 SDK has to compile as one file.
 
+**Status:** zaplang-io/zap#283 landed (Stage A intra-project + Stage B package
+imports). `import aws.core` and qualified `core.foo(...)` (with keyword args)
+work. **Not yet adopted here:** local-module resolution is rooted at the *entry
+file's own directory*, so `zap run tests/x.zap` looks for `tests/aws/core.zap`,
+not `src/aws/core.zap`. Adopting `import` therefore means either relocating every
+runnable entry (tests, examples) beside the `aws/` package, or shipping the core
+as a materialized zenv dependency — a repo re-layout that is out of scope for an
+ergonomic rewrite of the clients. `zap test` also does not yet resolve local
+module imports in discovered test files (it compiles each standalone).
+
 **Workaround:** keep the modules split under `src/aws/` for structure and stitch
 them with `tools/bundle.py` (concatenate + de-dup imports) into one file per
-runnable program.
+runnable program, as before.
 
-**Issue:** zaplang-io/zap#283
+**Issue:** zaplang-io/zap#283 (follow-up: adopt `import` + the entry-dir-rooting
+/ `zap test` resolution notes above)
 
-## 2. Strings are opaque at run time  — blocks SigV4 canonicalization
+## 2. Strings are opaque at run time  — RESOLVED (zaplang-io/zap#284/#285)
+
+*Historical.* This was the single biggest v1 constraint; it is now fixed and
+this rewrite relies on the full string surface (see "Resolved since v1" above).
+The original write-up is kept for the record.
 
 At run time a `str` supports only `+`, `len`, and being passed to builtins
 (`print`, `crypto`). Everything else is unavailable:
@@ -73,7 +134,10 @@ String `==` being unavailable also forced a `has_session: bool` field on
 
 **Issue:** zaplang-io/zap#284 (superset of zaplang-io/zap#278 `str==`, zaplang-io/zap#282 string<->int, zaplang-io/zap#281 dict get)
 
-## 3. No `int → str` (and f-strings don't codegen)  — blocks numeric wire fields
+## 3. No `int → str` (and f-strings don't codegen)  — RESOLVED (zaplang-io/zap#285)
+
+*Historical.* `str(int)`, `float(s)`, `bool(x)`, `format()` and f-string codegen
+all landed; `Content-Length` is now computed in-SDK. Original write-up kept.
 
 ```
 str(42)             # error[ZAP3003]: call to unknown function 'str'

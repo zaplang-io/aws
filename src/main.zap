@@ -5,7 +5,7 @@
 # files yet — see FRICTION.md #1). This stub just points you at the tooling.
 
 def main():
-    print("Zap AWS SDK (thin vertical v1).")
+    print("Zap AWS SDK (hand-written S3 + DynamoDB + SigV4 core).")
     print("Run the offline tests:   tools/run-tests.sh")
     print("Run an example:          tools/zrun.sh src/aws/core.zap \\")
     print("    src/aws/dynamodb.zap examples/dynamodb_get_item.main.zap")

@@ -1,4 +1,4 @@
-# aws.core — shared hand-written core for the Zap AWS SDK (thin vertical v1).
+# aws.core — shared hand-written core for the Zap AWS SDK.
 #
 # This module is the "botocore runtime" half of the design (D-0011 §2): the
 # bounded, hand-written pieces every service shares — credential resolution,
@@ -6,20 +6,21 @@
 # the stdlib `tls` sockets. The per-service modules (aws.s3, aws.dynamodb) build
 # requests and hand them to the functions here.
 #
-# SCOPE NOTE (v1 is a hand-written thin vertical, not the codegen generator):
-# AWS SigV4 is normally computed by *canonicalizing* a request — percent-encoding
-# the path, lowercasing + sorting header names, trimming header values. The Zap
-# runtime today exposes almost no string surgery (no indexing, slicing, char
-# access, case conversion, comparison, or int->str; see FRICTION.md). So the
-# canonicalization here works on inputs the caller has already normalized:
-# header names are written as lowercase literals in a fixed sorted order, and the
-# URI/query are expected pre-encoded. Everything in this file is built with the
-# operations that DO work at runtime: string concatenation (`+`), `crypto`, and
-# `os.getenv`. The signer is proven byte-for-byte against AWS's published vectors
-# in tests/sigv4_vectors.main.zap.
+# ERGONOMIC REWRITE: the first cut of this core predated several language
+# features and had to work around their absence (see FRICTION.md). SigV4
+# canonicalization is *generic* here now that the runtime exposes real strings
+# and dicts (zaplang-io/zap#284/#285/#299/#281): callers pass a `dict[str,str]`
+# of headers and this module lowercases the names, trims the values, sorts them,
+# and emits the canonical header block + signed-header list itself — no more
+# hand-sorted literal header runs. Numeric wire fields (Content-Length) are
+# rendered internally with `str(len(body))` instead of being threaded through
+# the API as caller-supplied strings. The signer is still proven byte-for-byte
+# against AWS's published vectors in tests/sigv4_vectors.main.zap.
 #
-# When imports + richer strings land, this file splits cleanly into an importable
-# `aws-core` package and the generator emits per-service clients on top of it.
+# Still pre-normalized (documented limits, unchanged from v1): URI path segments
+# and query keys/values must already be URI-safe (no per-segment percent-encode
+# helper yet), and `X-Amz-Date`/the scope date are supplied by the caller
+# (datetime has no SigV4 strftime yet; FRICTION.md #4).
 
 import crypto
 import os
@@ -30,10 +31,11 @@ import tls
 # ---------------------------------------------------------------------------
 
 # Resolved AWS credentials. `session_token` is "" when there is no temporary
-# session (static keys); `has_session` says whether a token is present. The
-# explicit bool exists because the runtime cannot compare strings yet (no
-# `session_token == ""`; see FRICTION.md), and the signer must know whether to
-# emit the x-amz-security-token header. This mirrors boto3's Credentials object.
+# session (static keys); `has_session` says whether a token is present and is
+# what the signer checks to decide whether to emit the x-amz-security-token
+# header. (String `==` now works, but the explicit flag stays: it is the public
+# shape callers already build against, and it reads clearly.) Mirrors boto3's
+# Credentials object.
 struct Credentials:
     str access_key
     str secret_key
@@ -43,8 +45,7 @@ struct Credentials:
 # Resolve credentials from the environment (provider #1 of the D-0011 chain:
 # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN). This also
 # covers Lambda, which injects these. The shared-config-file, IMDSv2, and
-# container providers are deferred (they need string parsing / IMDS calls that
-# the thin vertical does not yet implement; see FRICTION.md and D-0011 §5).
+# container providers are deferred (D-0011 §5).
 def credentials_from_env() -> Credentials:
     auto token = ""
     auto has = False
@@ -58,33 +59,32 @@ def credentials_from_env() -> Credentials:
         has_session=has,
     )
 
-# Build Credentials from literal values (for examples/tests or explicit config).
-def credentials(str access_key, str secret_key) -> Credentials:
-    return Credentials(
-        access_key=access_key,
-        secret_key=secret_key,
-        session_token="",
-        has_session=False,
-    )
-
-# Build temporary (session) Credentials, including a security token.
-def credentials_with_token(
-    str access_key, str secret_key, str session_token
-) -> Credentials:
+# Build Credentials from literal values. Pass `session_token` for temporary
+# (session) credentials; omit it for static keys. `has_session` is derived.
+def credentials(str access_key, str secret_key, str session_token = "") -> Credentials:
+    auto has = len(session_token) > 0
     return Credentials(
         access_key=access_key,
         secret_key=secret_key,
         session_token=session_token,
-        has_session=True,
+        has_session=has,
     )
+
+# Back-compat alias for the v1 three-argument constructor. `credentials` with a
+# non-empty `session_token` is the preferred form.
+def credentials_with_token(
+    str access_key,
+    str secret_key,
+    str session_token,
+) -> Credentials:
+    return credentials(access_key, secret_key, session_token)
 
 # ---------------------------------------------------------------------------
 # Payload hashing
 # ---------------------------------------------------------------------------
 
-# The SigV4 "x-amz-content-sha256" value for a body. Returns the lowercase hex
-# SHA-256 of the payload. For an empty body this is the well-known
-# e3b0c442...b7852b855.
+# The SigV4 "x-amz-content-sha256" value for a body: the lowercase hex SHA-256
+# of the payload. For an empty body this is the well-known e3b0c442...7852b855.
 def payload_hash(str body) -> str:
     return crypto.sha256(body)
 
@@ -92,6 +92,53 @@ def payload_hash(str body) -> str:
 # hashing large/streaming uploads (the body is still protected by TLS).
 def unsigned_payload() -> str:
     return "UNSIGNED-PAYLOAD"
+
+# The decimal Content-Length of a body. Rendered here with `str(len(body))`
+# (zaplang-io/zap#285) — v1 could not turn an int into a string, so the length
+# used to be threaded through every service API as a caller-supplied string.
+def content_length(str body) -> str:
+    return str(len(body))
+
+# ---------------------------------------------------------------------------
+# Small ordered-string helper
+# ---------------------------------------------------------------------------
+
+# Return a sorted copy of `xs` (ascending, byte/codepoint order via `str <`).
+# Lists expose only append/index/len/iterate — no `.sort()` — so this is a
+# hand-rolled insertion sort. It is written to never index with a negative
+# subscript: Zap's `and`/`or` do NOT short-circuit (FRICTION.md), so a bounds
+# check cannot guard an index in the same boolean expression.
+def sorted_strings(list[str] xs) -> list[str]:
+    list[str] out = []
+    for x in xs:
+        out.append(x)
+    auto n = len(out)
+    auto i = 1
+    while i < n:
+        auto key = out[i]
+        auto j = i - 1
+        auto placed = False
+        while not placed:
+            if j < 0:
+                placed = True
+            else:
+                auto cur = out[j]
+                if key < cur:
+                    out[j + 1] = cur
+                    j = j - 1
+                else:
+                    placed = True
+        out[j + 1] = key
+        i = i + 1
+    return out
+
+# The sorted key list of a string dict (used to canonicalize headers/params
+# deterministically regardless of the dict's own iteration order).
+def sorted_keys(dict[str, str] d) -> list[str]:
+    list[str] ks = []
+    for k in d.keys():
+        ks.append(k)
+    return sorted_strings(ks)
 
 # ---------------------------------------------------------------------------
 # SigV4 signing-key derivation (D-0011 §5)
@@ -104,9 +151,7 @@ def unsigned_payload() -> str:
 #   kSigning = HMAC(kService, "aws4_request")
 # Each step feeds the previous step's RAW digest bytes as the next key — exactly
 # what crypto.hmac_sha256_raw (I#153) was added for. `date_stamp` is YYYYMMDD.
-def signing_key(
-    str secret, str date_stamp, str region, str service
-) -> bytes:
+def signing_key(str secret, str date_stamp, str region, str service) -> bytes:
     auto k_date = crypto.hmac_sha256_raw("AWS4" + secret, date_stamp)
     auto k_region = crypto.hmac_sha256_raw(k_date, region)
     auto k_service = crypto.hmac_sha256_raw(k_region, service)
@@ -117,54 +162,74 @@ def credential_scope(str date_stamp, str region, str service) -> str:
     return date_stamp + "/" + region + "/" + service + "/aws4_request"
 
 # ---------------------------------------------------------------------------
+# Canonical headers / query from dicts (the generic SigV4 canonicalization)
+# ---------------------------------------------------------------------------
+
+# One "name:value\n" canonical header line (name lowercase, value trimmed).
+def header_line(str lower_name, str value) -> str:
+    return lower_name + ":" + value + "\n"
+
+# The SigV4 canonical header block for a header dict: each header as
+# "name:value\n" with the name lowercased and the value trimmed, the whole block
+# sorted by lowercased name. The caller just builds a dict of the headers it
+# intends to sign; this does the lowercase/trim/sort SigV4 requires.
+def canonical_headers(dict[str, str] headers) -> str:
+    auto block = ""
+    for name in sorted_keys(headers):
+        Optional[str] v = headers.get(name)
+        block = block + name.lower() + ":" + v.unwrap_or("").strip() + "\n"
+    return block
+
+# The ";"-joined, sorted, lowercased signed-header name list for a header dict.
+def signed_headers(dict[str, str] headers) -> str:
+    auto out = ""
+    auto first = True
+    for name in sorted_keys(headers):
+        if first:
+            out = name.lower()
+            first = False
+        else:
+            out = out + ";" + name.lower()
+    return out
+
+# The SigV4 canonical query string for a parameter dict: "key=value" pairs,
+# sorted by key, joined with "&". Keys and values must already be URI-encoded
+# (no percent-encode helper yet; see the module header). Returns "" for an empty
+# parameter set.
+def canonical_query(dict[str, str] params) -> str:
+    auto out = ""
+    auto first = True
+    for key in sorted_keys(params):
+        Optional[str] v = params.get(key)
+        auto pair = key + "=" + v.unwrap_or("")
+        if first:
+            out = pair
+            first = False
+        else:
+            out = out + "&" + pair
+    return out
+
+# ---------------------------------------------------------------------------
 # Canonical request + string-to-sign + signature (D-0011 §5)
 # ---------------------------------------------------------------------------
 
 # Assemble the SigV4 canonical request from already-canonical pieces:
 #   method \n uri \n query \n canonical_headers \n signed_headers \n payload_sha
-# `canonical_headers` must be the "name:value\n" block (each line terminated by
-# \n, names lowercase, sorted); `signed_headers` the ";"-joined lowercase names.
 def canonical_request(
     str method,
     str uri,
     str query,
-    str canonical_headers,
-    str signed_headers,
+    str canon_headers,
+    str signed_header_list,
     str payload_sha,
 ) -> str:
-    return (
-        method
-        + "\n"
-        + uri
-        + "\n"
-        + query
-        + "\n"
-        + canonical_headers
-        + "\n"
-        + signed_headers
-        + "\n"
-        + payload_sha
-    )
-
-# One "name:value\n" canonical header line.
-def header_line(str lower_name, str value) -> str:
-    return lower_name + ":" + value + "\n"
+    return method + "\n" + uri + "\n" + query + "\n" + canon_headers + "\n" + signed_header_list + "\n" + payload_sha
 
 # The SigV4 string-to-sign:
 #   "AWS4-HMAC-SHA256" \n amz_date \n credential_scope \n hex(sha256(canon_req))
 # `amz_date` is the full ISO basic timestamp YYYYMMDDTHHMMSSZ.
-def string_to_sign(
-    str amz_date, str cred_scope, str canon_req
-) -> str:
-    return (
-        "AWS4-HMAC-SHA256"
-        + "\n"
-        + amz_date
-        + "\n"
-        + cred_scope
-        + "\n"
-        + crypto.sha256(canon_req)
-    )
+def string_to_sign(str amz_date, str cred_scope, str canon_req) -> str:
+    return "AWS4-HMAC-SHA256" + "\n" + amz_date + "\n" + cred_scope + "\n" + crypto.sha256(canon_req)
 
 # The final hex signature = HMAC-SHA256(signing_key, string_to_sign).
 def sign(bytes key, str sts) -> str:
@@ -172,18 +237,70 @@ def sign(bytes key, str sts) -> str:
 
 # The value for the HTTP `Authorization` header.
 def authorization_header(
-    str access_key, str cred_scope, str signed_headers, str signature
+    str access_key,
+    str cred_scope,
+    str signed_header_list,
+    str signature,
 ) -> str:
-    return (
-        "AWS4-HMAC-SHA256 Credential="
-        + access_key
-        + "/"
-        + cred_scope
-        + ", SignedHeaders="
-        + signed_headers
-        + ", Signature="
-        + signature
-    )
+    return "AWS4-HMAC-SHA256 Credential=" + access_key + "/" + cred_scope + ", SignedHeaders=" + signed_header_list + ", Signature=" + signature
+
+# ---------------------------------------------------------------------------
+# One-call request signing + HTTP/1.1 assembly
+# ---------------------------------------------------------------------------
+
+# The wire header run for a signed-header dict: "name: value\r\n" per header,
+# names lowercased, sorted. AWS treats header names case-insensitively, so the
+# canonical lowercase spelling is used verbatim on the wire too.
+def wire_headers(dict[str, str] headers) -> str:
+    auto out = ""
+    for name in sorted_keys(headers):
+        Optional[str] v = headers.get(name)
+        out = out + name.lower() + ": " + v.unwrap_or("") + "\r\n"
+    return out
+
+# Sign a request described by its headers dict and return ready-to-send
+# HTTP/1.1 text. `headers` maps the (lowercase) header names to sign -> values;
+# the caller includes host, x-amz-date, x-amz-content-sha256, and any
+# service-specific headers (x-amz-target, content-type, x-amz-meta-*, ...). The
+# x-amz-security-token header is injected here when the credentials carry a
+# session. `payload_sha` is the x-amz-content-sha256 value (body hash or
+# UNSIGNED-PAYLOAD) and must match the header. `query` is the canonical query
+# string (from canonical_query) or "". Content-Length is computed from `body`.
+#
+# The wire request carries the signed headers, then Content-Length, then
+# Authorization (Connection: close is added by http_request_text). Only the
+# headers in `headers` are signed.
+def sign_request(
+    Credentials creds,
+    str region,
+    str service,
+    str method,
+    str path,
+    str query,
+    str body,
+    str payload_sha,
+    str amz_date,
+    str date_stamp,
+    dict[str, str] headers,
+) -> str:
+    auto to_sign = headers.copy()
+    if creds.has_session:
+        to_sign["x-amz-security-token"] = creds.session_token
+
+    auto canon = canonical_headers(to_sign)
+    auto shead = signed_headers(to_sign)
+    auto creq = canonical_request(method, path, query, canon, shead, payload_sha)
+    auto cred_scope = credential_scope(date_stamp, region, service)
+    auto sts = string_to_sign(amz_date, cred_scope, creq)
+    auto key = signing_key(creds.secret_key, date_stamp, region, service)
+    auto signature = sign(key, sts)
+    auto auth = authorization_header(creds.access_key, cred_scope, shead, signature)
+
+    auto headers_block = wire_headers(to_sign) + "content-length: " + content_length(body) + "\r\n" + "authorization: " + auth + "\r\n"
+    auto target = path
+    if len(query) > 0:
+        target = path + "?" + query
+    return http_request_text(method, target, headers_block, body)
 
 # ---------------------------------------------------------------------------
 # Endpoint / host resolution (D-0011 §6 — simple template, no ruleset engine)
@@ -205,20 +322,13 @@ def s3_virtual_host(str bucket, str region) -> str:
 
 # Send a fully-formed HTTP/1.1 request string over a verified TLS connection to
 # `host`:443 and return the raw response text (status line + headers + body).
-# The stdlib `tls` client rides the netpoller; we send the request and read
-# until the peer closes (the AWS endpoints honor our `Connection: close`).
-#
-# Response PARSING (splitting status/headers/body) needs string indexing/slicing
-# that the runtime does not expose yet (FRICTION.md), so v1 returns the raw text
-# and leaves parsing to the caller / a future richer-strings follow-up.
+# The AWS endpoints honor our `Connection: close`, so we read until EOF.
 def send_https(str host, str raw_request) -> str:
     auto conn = tls.connect(host, 443)
     tls.send(conn, raw_request)
     auto out = ""
     auto chunk = tls.recv(conn, 65536)
     auto remaining = 64
-    # Read in a bounded loop until a recv returns empty (peer closed) or the cap
-    # is hit. `recv` returns "" at EOF.
     for i in range(0, remaining):
         out = out + chunk
         chunk = tls.recv(conn, 65536)
@@ -226,22 +336,8 @@ def send_https(str host, str raw_request) -> str:
     return out
 
 # Build a raw HTTP/1.1 request from its parts. `headers_block` is the already
-# assembled "Name: value\r\n"... run (including the signed AWS headers); the
-# request line + Host + Connection: close framing is added here.
-#
-# NOTE: Content-Length must appear in `headers_block` and must match len(body).
-# The runtime has no int->str yet (FRICTION.md), so the caller supplies the
-# length as a string; the service modules thread it through as `content_length`.
-def http_request_text(
-    str method, str path, str headers_block, str body
-) -> str:
-    return (
-        method
-        + " "
-        + path
-        + " HTTP/1.1\r\n"
-        + headers_block
-        + "Connection: close\r\n"
-        + "\r\n"
-        + body
-    )
+# assembled "name: value\r\n"... run (including the signed AWS headers,
+# Content-Length and Authorization); the request line + Connection: close
+# framing + the blank-line/body separator are added here.
+def http_request_text(str method, str path, str headers_block, str body) -> str:
+    return method + " " + path + " HTTP/1.1\r\n" + headers_block + "Connection: close\r\n" + "\r\n" + body

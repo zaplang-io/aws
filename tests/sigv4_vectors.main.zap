@@ -8,6 +8,11 @@
 # scratch through aws.core and print them. tests/expected/sigv4_vectors.expected
 # pins the exact bytes AWS publishes, so any drift in the signer fails the diff.
 #
+# This drives the GENERIC, dict-driven canonicalization (canonical_headers /
+# signed_headers): the caller supplies a header dict and aws.core lowercases,
+# trims and sorts it. Matching AWS's published signature proves the canonical
+# path is correct, not just a hand-sorted literal block.
+#
 # Run:  tools/zrun.sh src/aws/core.zap tests/sigv4_vectors.main.zap
 
 def main():
@@ -27,16 +32,14 @@ def main():
     # expect: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
     print(body_hash)
 
-    # Fixed, pre-sorted lowercase header set: content-type, host, x-amz-date.
-    auto canon_headers = (
-        header_line("content-type", ctype)
-        + header_line("host", host)
-        + header_line("x-amz-date", amz_date)
-    )
-    auto signed_headers = "content-type;host;x-amz-date"
-    auto creq = canonical_request(
-        "GET", "/", query, canon_headers, signed_headers, body_hash
-    )
+    # The header dict the request signs; aws.core sorts/lowercases it.
+    dict[str, str] headers = {}
+    headers["content-type"] = ctype
+    headers["host"] = host
+    headers["x-amz-date"] = amz_date
+    auto canon_headers = canonical_headers(headers)
+    auto signed = signed_headers(headers)
+    auto creq = canonical_request("GET", "/", query, canon_headers, signed, body_hash)
     # expect: f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59
     print(crypto.sha256(creq))
 
@@ -54,4 +57,4 @@ def main():
     print(signature)
 
     # --- Authorization header -------------------------------------------
-    print(authorization_header(access, cred_scope, signed_headers, signature))
+    print(authorization_header(access, cred_scope, signed, signature))

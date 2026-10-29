@@ -22,6 +22,8 @@ jobs:
             ghcr.io/zaplang-io/zap:latest bash -lc '
               set -euo pipefail
               echo "zap: $(zap --version)"
+              # Canonical formatting gate (dogfoods `zap fmt`, D-0037).
+              zap fmt --check src tests examples
               # Independent SigV4 oracle re-derives the pinned fixtures (no toolchain).
               python3 tools/verify_vectors.py
               # Real compile + run: proves aws.core PRODUCES the signed bytes.
@@ -31,4 +33,6 @@ jobs:
                 examples/dynamodb_get_item.main.zap
               bash tools/zrun.sh src/aws/core.zap src/aws/s3.zap \
                 examples/s3_list_objects.main.zap
+              bash tools/zrun.sh src/aws/core.zap src/aws/s3.zap \
+                examples/s3_put_object.main.zap
             '

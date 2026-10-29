@@ -7,35 +7,95 @@
 # Fixed inputs use AWS's published example credentials + timestamp so the output
 # is fully deterministic.
 #
+# Besides the plain operations, this exercises the ergonomic API shapes:
+#   * S3 PutObject with a content_type + a metadata dict (signed x-amz-meta-*).
+#   * DynamoDB PutItem from string + numeric attribute dicts.
+#   * S3 ListObjectsV2 with prefix + max_keys turned into a canonical query.
+#
 # Run: tools/zrun.sh src/aws/core.zap src/aws/dynamodb.zap src/aws/s3.zap \
 #          tests/service_signing.main.zap
 
 def main():
-    auto creds = credentials(
-        "AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
-    )
+    auto creds = credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY")
     auto region = "us-east-1"
     auto amz_date = "20150830T123600Z"
     auto date_stamp = "20150830"
 
-    # DynamoDB GetItem on table "Users", key id="alice". The body is 48 bytes.
+    # DynamoDB GetItem on table "Users", key id="alice".
     print("### dynamodb.GetItem ###")
-    auto ddb = get_item_request(
-        creds, region, "Users", "id", "alice", amz_date, date_stamp, "48"
+    print(
+        get_item_request(creds, region, "Users", {"id": "alice"}, amz_date, date_stamp),
     )
-    print(ddb)
+
+    # DynamoDB PutItem: string attrs {id, name} + numeric attr {age}.
+    print("### dynamodb.PutItem ###")
+    print(
+        put_item_request(
+            creds,
+            region,
+            "Users",
+            {"id": "alice", "name": "Alice"},
+            amz_date,
+            date_stamp,
+            numbers={"age": "30"},
+        ),
+    )
 
     # S3 GetObject my-bucket/hello.txt.
     print("### s3.GetObject ###")
-    auto s3get = get_object_request(
-        creds, region, "my-bucket", "hello.txt", amz_date, date_stamp
+    print(
+        get_object_request(
+            creds,
+            region,
+            "my-bucket",
+            "hello.txt",
+            amz_date,
+            date_stamp,
+        ),
     )
-    print(s3get)
 
-    # S3 PutObject my-bucket/hello.txt with body "hi" (2 bytes).
-    print("### s3.PutObject ###")
-    auto s3put = put_object_request(
-        creds, region, "my-bucket", "hello.txt", "hi", "2", amz_date,
-        date_stamp,
+    # S3 ListObjectsV2 with prefix + max_keys (canonical query from a dict).
+    print("### s3.ListObjectsV2 ###")
+    print(
+        list_objects_v2_request(
+            creds,
+            region,
+            "my-bucket",
+            amz_date,
+            date_stamp,
+            prefix="photos/",
+            max_keys=10,
+        ),
     )
-    print(s3put)
+
+    # S3 PutObject my-bucket/hello.txt with body "hi" (default content type).
+    print("### s3.PutObject ###")
+    print(
+        put_object_request(
+            creds,
+            region,
+            "my-bucket",
+            "hello.txt",
+            "hi",
+            amz_date,
+            date_stamp,
+        ),
+    )
+
+    # S3 PutObject with an explicit content type + object metadata (signed).
+    # Kept last: its body ("hi") is non-empty so the pinned output does not end
+    # on a blank line (the shell test harness strips trailing newlines).
+    print("### s3.PutObject+meta ###")
+    print(
+        put_object_request(
+            creds,
+            region,
+            "my-bucket",
+            "hello.txt",
+            "hi",
+            amz_date,
+            date_stamp,
+            content_type="text/plain",
+            metadata={"owner": "alice", "team": "zap"},
+        ),
+    )

@@ -41,9 +41,7 @@ def main():
     auto amz_date = os.getenv("ZAP_AWS_AMZ_DATE")
     auto date_stamp = os.getenv("ZAP_AWS_DATE_STAMP")
 
-    auto req = list_objects_v2_request(
-        creds, region, bucket, amz_date, date_stamp
-    )
+    auto req = list_objects_v2_request(creds, region, bucket, amz_date, date_stamp)
     auto host = s3_host(bucket, region)
     print("--- request ---")
     print(req)
