@@ -15,9 +15,12 @@ The file list is supplied on the command line (library modules first, the
 `main()` last); there is no hard-coded manifest. The current modules are
 `src/aws/core.zap`, `src/aws/credentials.zap`, `src/aws/endpoints.zap`,
 `src/aws/retry.zap`, `src/aws/awsjson.zap` (the awsJson 1.0/1.1 protocol codec,
-bundled after core and before the service modules that ride it), `src/aws/
-dynamodb.zap` and `src/aws/s3.zap`; the test/example harnesses in tools/ pass the
-subset each entry point needs.
+bundled after core and before the service modules that ride it),
+`src/aws/binding.zap` (the protocol-agnostic HTTP binding layer),
+`src/aws/restjson.zap` (the rest-json codec), `src/aws/dynamodb.zap` and
+`src/aws/s3.zap`; the test/example harnesses in tools/ pass the subset each entry
+point needs. `binding.zap` depends on `core.zap`, and `restjson.zap` on both, so
+bundle them in that order (core, then binding, then restjson).
 
 Usage:
     tools/bundle.py src/aws/core.zap src/aws/credentials.zap tests/foo.main.zap > out.zap

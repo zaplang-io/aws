@@ -1,0 +1,50 @@
+### rest-json PutThing (label+query+header+document) ###
+PUT /things/a%20b/items/deep/key%20path?mode=fast&q=a%20b HTTP/1.1
+content-type: application/json
+host: example.execute-api.us-east-1.amazonaws.com
+x-amz-content-sha256: 5e5db7a5c0d739fc346a4f15aa40e2f34e9ba7d1c56a79eb341575a5d36f475b
+x-amz-date: 20150830T123600Z
+x-custom: hello
+content-length: 40
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/execute-api/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-custom, Signature=a487457efe4c4523cab0dbd2340badacebb6f4f9106f19b715ed1dc80a8ad05d
+Connection: close
+
+{"name":"gadget","size":7,"active":true}
+### rest-json PutRaw (raw payload member) ###
+PUT /raw/blob1 HTTP/1.1
+content-type: application/octet-stream
+host: example.execute-api.us-east-1.amazonaws.com
+x-amz-content-sha256: b7e43c485acc8d95d78bf0e6956200beb26182ee8b2da853a3ae9440969e4ee2
+x-amz-date: 20150830T123600Z
+content-length: 17
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/execute-api/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, Signature=d01c3cae83a6f497dfce04f27e933c977070eed63d857ca97e327c0b807e3e44
+Connection: close
+
+raw-payload-bytes
+### rest-json PutMeta (prefix headers) ###
+PUT /meta HTTP/1.1
+content-type: application/json
+host: example.execute-api.us-east-1.amazonaws.com
+x-amz-content-sha256: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+x-amz-date: 20150830T123600Z
+x-amz-meta-owner: alice
+x-amz-meta-team: zap
+content-length: 2
+authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/execute-api/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-meta-owner;x-amz-meta-team, Signature=92cfe96172b60c582708d411b4ff15af955a8c13a022e1a50d5bfe45aa2286ab
+Connection: close
+
+{}
+### rest-json response binding ###
+status=200
+x-request-id=req-123
+out.id=thing-9
+out.version=3
+meta.owner=alice
+meta.team=zap
+### rest-json error dispatch ###
+code=ResourceNotFoundException
+message=no such thing
+status=400
+code2=InternalFailure
+message2=boom
+ok-no-error
