@@ -2,7 +2,7 @@
 # API — a content type and object metadata passed as keyword arguments.
 #
 # Bundle + run:
-#   tools/zrun.sh src/aws/core.zap src/aws/s3.zap \
+#   tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap src/aws/s3.zap \
 #       examples/s3_put_object.main.zap
 #
 # Required environment (see README "Running against real AWS"):

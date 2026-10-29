@@ -34,10 +34,17 @@ is [D-0011](https://github.com/zaplang-io/zap/blob/main/design/0011-aws-sdk.md).
 - **Request/Response model**: per-service code builds a `Request`
   (method/service/region/host/path/query/headers/body) and hands it to the
   runtime; `send`/`parse_response` return a parsed `Response`.
+- **Endpoint / region resolution** (`aws.endpoints`, #342): a structured
+  resolver — partition awareness (`aws` / `aws-cn` / `aws-us-gov`), the
+  `{service}[-fips].{region}.{dnsSuffix|api.aws}` service template, and S3
+  addressing (virtual-hosted vs path style by bucket DNS-compatibility or a
+  flag, the `s3.dualstack` / `-fips` labels, and the us-east-1 global quirk).
+  The v1 core template names stay as thin shims over it. The full AWS
+  endpoint-ruleset JSON engine (access points, custom endpoints) can replace the
+  bodies without reshaping callers (#342 follow-up).
 - **Seams for the later phases**: a credentials seam (env + static now; full
-  provider chain #341), endpoint/region resolution (regional/virtual-host
-  template now; ruleset engine #342), retry (fixed cap now; standard mode #343),
-  error dispatch (`parse_error` → typed `AwsError`), and pagination hooks.
+  provider chain #341), retry (fixed cap now; standard mode #343), error
+  dispatch (`parse_error` → typed `AwsError`), and pagination hooks.
 - **Credentials** from the environment (`AWS_ACCESS_KEY_ID` /
   `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`) — the provider that also covers
   Lambda — or from static keys.
@@ -60,11 +67,13 @@ SigV4 implementation in `tools/verify_vectors.py`.
 
 ```
 zap.toml                       package manifest (official-tier metadata)
-src/aws/core.zap               shared core: credentials, SigV4, endpoints, transport
+src/aws/core.zap               shared core: credentials, SigV4, transport, seams
+src/aws/endpoints.zap          partition/region/endpoint resolver (#342)
 src/aws/dynamodb.zap           DynamoDB client (get_item, put_item)
 src/aws/s3.zap                 S3 client (get_object, put_object, list_objects_v2)
 tests/sigv4_vectors.main.zap   offline SigV4 conformance vs AWS's published vectors
 tests/service_signing.main.zap offline: full signed DynamoDB/S3 requests, pinned
+tests/endpoints_resolution.main.zap offline: endpoint resolution matrix, pinned
 tests/expected/*.expected      pinned expected output
 examples/*.main.zap            runnable live-AWS examples (get-item, list, put-object)
 tools/bundle.py                stitch modules + a main() into one compilable file
@@ -123,17 +132,20 @@ export AWS_REGION=us-east-1
 
 # DynamoDB GetItem (edit table/key in the example):
 ZAP_REPO=/path/to/zap tools/zrun.sh \
-    src/aws/core.zap src/aws/dynamodb.zap examples/dynamodb_get_item.main.zap
+    src/aws/core.zap src/aws/endpoints.zap src/aws/dynamodb.zap \
+    examples/dynamodb_get_item.main.zap
 
 # S3 ListObjectsV2:
 export ZAP_AWS_BUCKET=my-bucket
 ZAP_REPO=/path/to/zap tools/zrun.sh \
-    src/aws/core.zap src/aws/s3.zap examples/s3_list_objects.main.zap
+    src/aws/core.zap src/aws/endpoints.zap src/aws/s3.zap \
+    examples/s3_list_objects.main.zap
 
 # S3 PutObject with a content type + metadata (boto3-style keyword args):
 export ZAP_AWS_BUCKET=my-bucket ZAP_AWS_KEY=hello.txt
 ZAP_REPO=/path/to/zap tools/zrun.sh \
-    src/aws/core.zap src/aws/s3.zap examples/s3_put_object.main.zap
+    src/aws/core.zap src/aws/endpoints.zap src/aws/s3.zap \
+    examples/s3_put_object.main.zap
 ```
 
 SigV4 rejects a timestamp skewed more than ~5 minutes, so the host clock must be
@@ -152,8 +164,10 @@ dict-based items) — see FRICTION.md "Resolved in Phase 1". What remains:
 
 - Credential chain is env + static only; the shared-config-file, IMDSv2,
   container, and process providers are deferred to the credential seam (#341).
-- Endpoint resolution is the regional/virtual-host template; the full
-  endpoint-ruleset engine (partitions, FIPS/dualstack, access points) is #342.
+- Endpoint resolution (`aws.endpoints`, #342) covers partitions, the FIPS and
+  dualstack knobs, and S3 virtual-vs-path addressing; the full data-driven AWS
+  endpoint-ruleset engine (access points, custom/sdk endpoints, the iso
+  partitions) is the #342 follow-up.
 - Retry is a fixed small cap with no backoff; standard mode (token bucket,
   exponential backoff + jitter) is #343.
 - Error dispatch and pagination are minimal baselines over the seams; a full

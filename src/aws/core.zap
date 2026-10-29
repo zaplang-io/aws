@@ -373,30 +373,34 @@ def http_request_text(str method, str path, str headers_block, str body) -> str:
     return method + " " + path + " HTTP/1.1\r\n" + headers_block + "Connection: close\r\n" + "\r\n" + body
 
 # ---------------------------------------------------------------------------
-# Endpoint / region resolution seam (D-0011 §6 — full ruleset is #342)
+# Endpoint / region resolution seam (D-0011 §6)
 # ---------------------------------------------------------------------------
 
-# A resolved endpoint. #342 replaces the template resolvers below with the AWS
-# endpoint-ruleset engine (partitions, FIPS/dualstack, S3 access points, ...)
-# without reshaping this struct or the signer that consumes `host`/`region`.
+# A resolved endpoint. The structured resolver in aws.endpoints (#342 —
+# partitions, FIPS/dualstack, S3 path-vs-virtual addressing) populates `host`;
+# the full AWS endpoint-ruleset engine (#342 follow-up) can replace it without
+# reshaping this struct or the signer that consumes `host`/`region`.
 struct Endpoint:
     str host
     str region
     str service
 
 # Regional host for a global-style service, e.g. ("dynamodb","us-east-1") ->
-# "dynamodb.us-east-1.amazonaws.com".
+# "dynamodb.us-east-1.amazonaws.com". Thin shim over aws.endpoints with the
+# default options (no FIPS/dualstack); the resolver is the single source of
+# truth for host templates.
 def regional_host(str service, str region) -> str:
-    return service + "." + region + ".amazonaws.com"
+    return resolve_service_host(service, region, default_options())
 
 # Virtual-hosted-style S3 host for a bucket, e.g.
-# ("my-bucket","us-east-1") -> "my-bucket.s3.us-east-1.amazonaws.com".
+# ("my-bucket","us-east-1") -> "my-bucket.s3.us-east-1.amazonaws.com". Thin shim
+# over aws.endpoints (default options, always bucket-in-host).
 def s3_virtual_host(str bucket, str region) -> str:
-    return bucket + ".s3." + region + ".amazonaws.com"
+    return s3_virtual_host_for(bucket, region, default_s3_options())
 
 # Baseline resolver: the templated regional host for a service.
 def resolve_endpoint(str service, str region) -> Endpoint:
-    return Endpoint(host=regional_host(service, region), region=region, service=service)
+    return resolve_service_endpoint(service, region, default_options())
 
 # Baseline resolver for virtual-hosted-style S3.
 def resolve_s3_endpoint(str bucket, str region) -> Endpoint:

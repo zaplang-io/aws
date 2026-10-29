@@ -33,10 +33,12 @@ run_case() {
 }
 
 run_case sigv4_vectors \
-    src/aws/core.zap tests/sigv4_vectors.main.zap
+    src/aws/core.zap src/aws/endpoints.zap tests/sigv4_vectors.main.zap
 run_case service_signing \
-    src/aws/core.zap src/aws/dynamodb.zap src/aws/s3.zap \
+    src/aws/core.zap src/aws/endpoints.zap src/aws/dynamodb.zap src/aws/s3.zap \
     tests/service_signing.main.zap
+run_case endpoints_resolution \
+    src/aws/core.zap src/aws/endpoints.zap tests/endpoints_resolution.main.zap
 
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2

@@ -1,7 +1,7 @@
 # Live example: DynamoDB GetItem against real AWS.
 #
 # Bundle + run:
-#   tools/zrun.sh src/aws/core.zap src/aws/dynamodb.zap \
+#   tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap src/aws/dynamodb.zap \
 #       examples/dynamodb_get_item.main.zap
 #
 # Required environment (see README "Running against real AWS"):

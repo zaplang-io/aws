@@ -12,8 +12,8 @@
 #   * DynamoDB PutItem from string + numeric attribute dicts.
 #   * S3 ListObjectsV2 with prefix + max_keys turned into a canonical query.
 #
-# Run: tools/zrun.sh src/aws/core.zap src/aws/dynamodb.zap src/aws/s3.zap \
-#          tests/service_signing.main.zap
+# Run: tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap src/aws/dynamodb.zap \
+#          src/aws/s3.zap tests/service_signing.main.zap
 
 def main():
     auto creds = credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY")
