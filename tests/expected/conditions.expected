@@ -1,0 +1,119 @@
+### key_eq ###
+EXPR: #n0 = :v0
+NAME #n0 pk
+VAL :v0 "alice"
+### key_eq_and_begins_with ###
+EXPR: (#n0 = :v0 AND begins_with(#n1, :v1))
+NAME #n0 pk
+NAME #n1 sk
+VAL :v0 "alice"
+VAL :v1 "2024"
+### key_eq_and_between ###
+EXPR: (#n0 = :v0 AND #n1 BETWEEN :v1 AND :v2)
+NAME #n0 pk
+NAME #n1 ts
+VAL :v0 "u1"
+VAL :v1 100
+VAL :v2 200
+### attr_gt_num ###
+EXPR: #n0 > :v0
+NAME #n0 age
+VAL :v0 30
+### attr_lt_num ###
+EXPR: #n0 < :v0
+NAME #n0 age
+VAL :v0 30
+### attr_lte_str ###
+EXPR: #n0 <= :v0
+NAME #n0 a
+VAL :v0 "m"
+### attr_gte_num ###
+EXPR: #n0 >= :v0
+NAME #n0 n
+VAL :v0 0
+### attr_ne_num ###
+EXPR: #n0 <> :v0
+NAME #n0 c
+VAL :v0 3
+### attr_between ###
+EXPR: #n0 BETWEEN :v0 AND :v1
+NAME #n0 age
+VAL :v0 18
+VAL :v1 65
+### attr_exists ###
+EXPR: attribute_exists(#n0)
+NAME #n0 email
+### attr_not_exists ###
+EXPR: attribute_not_exists(#n0)
+NAME #n0 email
+### attr_contains ###
+EXPR: contains(#n0, :v0)
+NAME #n0 tags
+VAL :v0 "vip"
+### attr_begins_with ###
+EXPR: begins_with(#n0, :v0)
+NAME #n0 name
+VAL :v0 "A"
+### attr_is_in ###
+EXPR: #n0 IN (:v0, :v1, :v2)
+NAME #n0 status
+VAL :v0 "A"
+VAL :v1 "B"
+VAL :v2 "C"
+### attr_size_gt ###
+EXPR: size(#n0) > :v0
+NAME #n0 name
+VAL :v0 5
+### attr_type ###
+EXPR: attribute_type(#n0, :v0)
+NAME #n0 data
+VAL :v0 "S"
+### attr_bool ###
+EXPR: #n0 = :v0
+NAME #n0 active
+VAL :v0 true
+### attr_null ###
+EXPR: #n0 <> :v0
+NAME #n0 x
+VAL :v0 null
+### not_eq ###
+EXPR: (NOT #n0 = :v0)
+NAME #n0 x
+VAL :v0 1
+### or_two ###
+EXPR: (#n0 = :v0 OR #n1 = :v1)
+NAME #n0 a
+NAME #n1 b
+VAL :v0 1
+VAL :v1 2
+### nested_path ###
+EXPR: #n0.#n1.#n2 = :v0
+NAME #n0 a
+NAME #n1 b
+NAME #n2 c
+VAL :v0 "z"
+### indexed_path ###
+EXPR: #n0[0].#n1 = :v0
+NAME #n0 a
+NAME #n1 b
+VAL :v0 "z"
+### mixed_path ###
+EXPR: #n0.#n1[2].#n2 = :v0
+NAME #n0 a
+NAME #n1 b
+NAME #n2 c
+VAL :v0 "z"
+### and_or_mix ###
+EXPR: ((#n0 = :v0 OR #n1 = :v1) AND #n2 <> :v2)
+NAME #n0 a
+NAME #n1 b
+NAME #n2 c
+VAL :v0 1
+VAL :v1 2
+VAL :v2 3
+### not_group ###
+EXPR: (NOT (#n0 > :v0 AND begins_with(#n1, :v1)))
+NAME #n0 age
+NAME #n1 name
+VAL :v0 21
+VAL :v1 "A"

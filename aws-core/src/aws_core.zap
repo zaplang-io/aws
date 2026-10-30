@@ -18,6 +18,12 @@
 #   import aws_core.restjson    # rest-json codec
 #   import aws_core.restxml     # rest-xml codec
 #   import aws_core.dynamic     # opt-in dynamic call() escape hatch (#365)
+#   import aws_core.conditions  # DynamoDB Key/Attr condition builder (#432/#433)
+#
+# `conditions` is the first hand-written ERGONOMICS module (epic #432): a boto3
+# resource-layer convenience that rides on top of the generated DynamoDB client,
+# not derivable from the models (D-0009). It is shipping surface, unlike the
+# parked s3 / dynamodb oracle fixtures below.
 #
 # Zap v1 has no re-export form (D-0081 §3), so this root module exposes only the
 # package version; consumers import the submodule they need. The hand-written
