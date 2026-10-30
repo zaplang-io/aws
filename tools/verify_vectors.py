@@ -393,6 +393,184 @@ def presign_url():
     return "\n".join(out) + "\n"
 
 
+def waiters():
+    """Independent reimplementation of aws.waiters — proves the pinned waiter
+    transitions in tests/expected/waiters.expected are the correct outcomes of
+    the botocore waiter algorithm, toolchain-free (the Zap side proves aws.waiters
+    PRODUCES them). Mirrors the engine: status/error/path/pathAll/pathAny matchers
+    over a parsed JSON DOM, acceptors evaluated in order, poll loop with a
+    maxAttempts cap. The fixtures are the same real waiters-2.json entries the
+    Zap test wires (S3 BucketExists/BucketNotExists, DynamoDB TableExists, EC2
+    InstanceRunning).
+    """
+    import json as _json
+
+    # Acceptor states and loop result codes live in separate spaces (as in the
+    # Zap engine): state failure == 2 but result failure == 1.
+    RETRY, SUCCESS, FAILURE = 0, 1, 2
+    R_SUCCESS, R_FAILURE, R_TIMEOUT = 0, 1, 2
+
+    def select_path(root, argument):
+        # The JMESPath subset waiters use: dotted fields with `[]` flattens.
+        current = [root]
+        for seg in argument.split("."):
+            name, flatten = seg, False
+            if seg.endswith("[]"):
+                flatten, name = True, seg[:-2]
+            if name:
+                nxt = []
+                for n in current:
+                    if isinstance(n, dict) and name in n:
+                        nxt.append(n[name])
+                current = nxt
+            if flatten:
+                nxt = []
+                for n in current:
+                    if isinstance(n, list):
+                        nxt.extend(n)
+                current = nxt
+        return current
+
+    def scalar_str(v):
+        if isinstance(v, str):
+            return v
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, (int, float)):
+            return str(v)
+        return ""
+
+    def parse_error_code(status, body):
+        if 200 <= status <= 299 or not body:
+            return ""
+        try:
+            doc = _json.loads(body)
+        except ValueError:
+            return ""
+        for k in ("__type", "code", "Code"):
+            if isinstance(doc, dict) and k in doc:
+                return doc[k]
+        return ""
+
+    def acc_match(acc, status, body, parsed):
+        kind = acc["matcher"]
+        exp = acc["expected"]
+        if kind == "status":
+            return str(status) == exp
+        if kind == "error":
+            return parse_error_code(status, body) == exp
+        vals = [scalar_str(v) for v in select_path(parsed, acc["argument"])]
+        if kind == "path":
+            return len(vals) == 1 and vals[0] == exp
+        if kind == "pathAll":
+            return len(vals) > 0 and all(v == exp for v in vals)
+        if kind == "pathAny":
+            return any(v == exp for v in vals)
+        return False
+
+    def evaluate(acceptors, status, body):
+        parsed = None if not body else _json.loads(body)
+        for acc in acceptors:
+            if acc_match(acc, status, body, parsed):
+                return acc["state"]
+        return RETRY
+
+    def run(acceptors, max_attempts, script):
+        attempt = 0
+        while attempt < max_attempts:
+            status, body = script[attempt] if attempt < len(script) else script[-1]
+            attempt += 1
+            st = evaluate(acceptors, status, body)
+            if st == SUCCESS:
+                return (R_SUCCESS, attempt)
+            if st == FAILURE:
+                return (R_FAILURE, attempt)
+        return (R_TIMEOUT, attempt)
+
+    def st(state, matcher, argument, expected):
+        return {
+            "state": state,
+            "matcher": matcher,
+            "argument": argument,
+            "expected": expected,
+        }
+
+    be = [
+        st(SUCCESS, "status", "", "200"),
+        st(SUCCESS, "status", "", "301"),
+        st(SUCCESS, "status", "", "403"),
+        st(RETRY, "status", "", "404"),
+    ]
+    bne = [st(SUCCESS, "status", "", "404")]
+    arg = "Reservations[].Instances[].State.Name"
+    te = [
+        st(SUCCESS, "path", "Table.TableStatus", "ACTIVE"),
+        st(RETRY, "error", "", "ResourceNotFoundException"),
+    ]
+    ir = [
+        st(SUCCESS, "pathAll", arg, "running"),
+        st(FAILURE, "pathAny", arg, "shutting-down"),
+        st(FAILURE, "pathAny", arg, "terminated"),
+        st(FAILURE, "pathAny", arg, "stopping"),
+    ]
+
+    def ddb_body(status):
+        return '{"Table": {"TableStatus": "%s"}}' % status
+
+    def ec2_body(n1, n2):
+        inst = '{"Instances": [{"State": {"Name": "%s"}}]}'
+        return '{"Reservations": [%s, %s]}' % (inst % n1, inst % n2)
+
+    rnf = '{"__type": "ResourceNotFoundException"}'
+    names = {RETRY: "retry", SUCCESS: "success", FAILURE: "failure"}
+    rnames = {R_SUCCESS: "success", R_FAILURE: "failure", R_TIMEOUT: "timeout"}
+
+    def ev(acceptors, status, body):
+        return names[evaluate(acceptors, status, body)]
+
+    out = []
+    out.append("== config ==")
+    out.append("BucketExists delay 5 max 20 acc 4")
+    out.append("BucketNotExists delay 5 max 20 acc 1")
+    out.append("TableExists delay 20 max 25 acc 2")
+    out.append("InstanceRunning delay 15 max 40 acc 4")
+
+    out.append("== matchers ==")
+    out.append("be 200 -> " + ev(be, 200, "{}"))
+    out.append("be 404 -> " + ev(be, 404, ""))
+    out.append("be 500 -> " + ev(be, 500, "{}"))
+    out.append("te active -> " + ev(te, 200, ddb_body("ACTIVE")))
+    out.append("te creating -> " + ev(te, 200, ddb_body("CREATING")))
+    out.append("te missing -> " + ev(te, 400, rnf))
+    out.append("ir running -> " + ev(ir, 200, ec2_body("running", "running")))
+    out.append("ir terminated -> " + ev(ir, 200, ec2_body("terminated", "running")))
+    out.append("ir pending -> " + ev(ir, 200, ec2_body("pending", "pending")))
+
+    def show(label, acceptors, max_attempts, script):
+        res, att = run(acceptors, max_attempts, script)
+        return "%s: %s attempts %d" % (label, rnames[res], att)
+
+    out.append("== loop ==")
+    out.append(show("bucket-exists", be, 20, [(404, ""), (404, ""), (200, "{}")]))
+    out.append(show("bucket-exists-timeout", be, 3, [(404, "")]))
+    out.append(show("bucket-not-exists", bne, 20, [(404, "")]))
+    out.append(show(
+        "table-exists",
+        te,
+        25,
+        [(400, rnf), (200, ddb_body("CREATING")), (200, ddb_body("ACTIVE"))],
+    ))
+    out.append(show(
+        "instance-running",
+        ir,
+        40,
+        [(200, ec2_body("pending", "pending")), (200, ec2_body("running", "running"))],
+    ))
+    out.append(show("instance-failed", ir, 40, [(200, ec2_body("terminated", "running"))]))
+
+    return "\n".join(out) + "\n"
+
+
 def check(name, computed):
     path = os.path.join(EXP, name + ".expected")
     with open(path, "r", newline="") as fh:
@@ -411,6 +589,7 @@ def main():
     ok &= check("service_signing", service_signing())
     ok &= check("streaming_sigv4", streaming_sigv4())
     ok &= check("presign_url", presign_url())
+    ok &= check("waiters", waiters())
     if not ok:
         return 1
     print("vectors verified against independent oracle")
