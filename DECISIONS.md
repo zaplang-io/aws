@@ -1025,6 +1025,21 @@ zenv, including the generator methods and the function-typed-field call) emitted
 ZIR with no diagnostics. CI (`ghcr.io/zaplang-io/zap:latest`) is the authoritative
 compile+run gate.
 
+**Blocked on a toolchain codegen gap (zaplang-io/zap#451).** CI compiles cleanly
+but runs the paginator test with EMPTY stdout — a whole-program lowering failure,
+not a runtime crash (not even the first `print` runs). The front-end accepts it
+(`zap ir` clean); only the LLVM backend path fails. Narrowed on the aws side: a
+function-typed field called from inside the generator frame and a tuple-of-structs
+return were both removed with no change, so the cause is the `yield` generator
+METHOD itself — defined in an imported package module and yielding a struct, a
+path the #429 goldens (single-file, int yields) and aws-codegen I#349's
+never-compiled generated paginators both leave untested. The decision stands as
+written (the engine is correct and the FE accepts it); the PR's CI is intentionally
+red pending the zap fix. If that fix slips, the proven D-0048
+`__iter__`/`__next__` + `raise StopIteration` protocol (the `stop_iter` run-golden)
+is a drop-in that lowers today with identical `for page in paginator.pages()`
+ergonomics and no API change — the documented fallback.
+
 **Follow-up (aws-codegen).** aws-codegen I#349 already emits per-op `paginate_<op>`
 generator methods that inline this loop. The follow-up is to have the generator
 emit, per paginated op, a `PaginatorConfig` (from `paginators-1.json`) plus a thin
