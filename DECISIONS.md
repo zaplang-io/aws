@@ -771,3 +771,88 @@ per-operation serialize/deserialize that builds a `CborValue` tree and calls
 `cbor_encode` / `cbor_decode`, plus the manifest entries for the 25 services. The
 real vectors here (the CloudWatch / Translate shapes) are the shape that generator
 must reproduce byte-for-byte against this oracle.
+
+## D-0009 — DynamoDB Key/Attr condition builder: a hand-written ergonomics module, boto3-byte-matched (2026-10-30)
+
+**Status:** accepted (ticket #433, the first piece of ergonomics epic #432).
+
+**Governing decisions.** aws-codegen D-0001 (generated-is-product: the generated
+per-service clients are the shipping SDK; the resource-layer conveniences boto3
+hand-codes on top of them are not derivable from botocore models, so they are
+hand-written). D-0047 (operator overloading, `zaplang-io/zap#52`) for the
+`&`/`|`/`~` DSL.
+
+**Context.** boto3's `boto3.dynamodb.conditions.Key` / `Attr` and its
+`ConditionExpressionBuilder` turn a chained, operator-combined condition into the
+expression string + `ExpressionAttributeNames` + `ExpressionAttributeValues` that
+every DynamoDB operation takes. The maintainer uses it heavily. It is the first
+hand-written ergonomics layer, the Zap equivalent of boto3's resource-layer
+conveniences — not an oracle fixture like `s3.zap` / `dynamodb.zap`, but real
+shipping aws-core surface that users of the generated DynamoDB client compose.
+
+**Decision.** A new shipping module `aws_core.conditions`:
+
+- `Key(name)` / `Attr(name)` return an `AttrRef`; its methods build leaf
+  `Condition`s: `eq lt lte gt gte between begins_with` (the Key subset) plus
+  `ne contains attribute_type exists not_exists is_in size` (Attr additions),
+  matching boto3's method split. `size()` flags the subject so a following
+  comparison wraps it in `size(...)`.
+- `&` / `|` / `~` on `Condition` (via `__and__`/`__or__`/`__invert__`) are AND /
+  OR / NOT with boto3's parenthesization.
+- Value operands are an `AttrValue` built by `S` / `N` / `Bool` / `Null`.
+- `build(cond) -> Built` is the stateful one-pass numbering, the counterpart of
+  `ConditionExpressionBuilder.build_expression`.
+
+**Oracle.** Output byte-matches boto3's `ConditionExpressionBuilder`:
+`tools/gen_condition_vectors.py` drives the real boto3 `Key`/`Attr` DSL for 25
+vectors, cross-checks a pure-Python mirror of the Zap algorithm against it, and
+writes `tests/expected/conditions.expected`; `tests/conditions.main.zap` prints
+the same `### / EXPR / NAME / VAL` blocks through the Zap module and
+`tools/run-tests.sh` diffs them. Matching facts pinned by the oracle:
+
+- **No dedup.** boto3 assigns a fresh `#nN` / `:vN` to every occurrence, even of
+  the same attribute name or value; so does this module. (The task brief's
+  mention of "dedup" does not match boto3's actual behaviour — the builder never
+  dedups — and matching boto3 wins.)
+- Placeholders are numbered in a left-to-right depth-first walk; within a leaf
+  the name placeholder(s) precede the value(s). The tree is immutable (so the
+  operators stay pure) and numbered in one pass, exactly as boto3 does.
+- Nested document paths split on `.`; bracket indices stay literal
+  (`a.b.c` -> `#n0.#n1.#n2`, `a[0].b` -> `#n0[0].#n1`). boto3 uses a regex
+  (`ATTR_NAME_REGEX`); this module reproduces it for well-formed names with a
+  split-on-`.` + first-`[` scan (string char-index-then-compare hits ZAP6001 on
+  the current toolchain, so the regex is not transliterated char by char). A
+  name with text after a bracket group in the same segment and no dot
+  (`a[0]foo`, not a real DynamoDB path) is the one documented divergence.
+
+**Values (#434 seam).** boto3's `ConditionExpressionBuilder` emits the RAW values
+(a later `TypeSerializer` in the resource layer makes AttributeValues). Native
+<->AttributeValue marshalling is ticket #434, queued separately. #433 mirrors the
+builder: `ExpressionAttributeValues` carries the raw-value JSON the builder
+produces (string -> `"x"`, number -> bare digits, bool -> `true`/`false`,
+null -> `null`); numbers are passed as decimal text (`N("30")`) to avoid float
+rounding. `AttrValue` is the single seam #434 slots into — it will add native
+int/float/Decimal/bytes coercion and the AttributeValue wire form with no change
+elsewhere. No JSON string escaping on this hand path (matches `dynamodb.zap`).
+
+**Toolchain gap found (blocks the fluent inline form; NOT an aws-repo bug).**
+`zaplang-io/zap` sema types every user-struct METHOD-call return as `Unknown`
+(crates/sema/src/lib.rs, the `recv.method(args)` fallthrough returns `Ty::Unknown`
+for a non-str/dict/Py receiver instead of resolving the method's declared return
+from `struct_info`). So the headline `Key("pk").eq(x) & Attr("age").gt(y)` does
+not yet compile: the method results are `Unknown`, and `Unknown & Unknown` falls
+back to the built-in bitwise `&` (int64) rather than dispatching `__and__`.
+Binding each leaf to its declared type first (`Condition c = Attr("x").eq(v)`)
+makes the operator dispatch and the output correct — the conformance test does
+this, so it is green on today's toolchain, and the builder logic/output are
+unaffected. Operator codegen itself is fine (the dunders lower and run). The
+clean fix is a small, host-verifiable sema change (resolve the return type via
+`struct_info(recv_ty).methods.get(name)` in that fallthrough), after which the
+fluent inline form works unchanged; recommended as a `zaplang-io/zap` follow-up.
+
+**Verification.** Host front-end only (Docker crashes the maintainer's host, so
+the local LLVM/Docker gate was skipped): a throwaway `origin/main` `cargo build -p
+zapc` front-end ran `zap fmt --check` and `zap ir` (full type-check through the
+materialized zenv) clean on the module and the test; the boto3 oracle generator
+re-derived green and its Python mirror byte-matches boto3 on all 25 vectors. CI
+(`ghcr.io/zaplang-io/zap:latest`) is the authoritative compile+run gate.
