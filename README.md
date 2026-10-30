@@ -79,6 +79,7 @@ aws-core/src/binding.zap       protocol-agnostic HTTP binding layer
 aws-core/src/awsjson.zap       awsJson 1.0/1.1 codec
 aws-core/src/restjson.zap      rest-json codec
 aws-core/src/restxml.zap       rest-xml codec
+aws-core/src/dynamic.zap       opt-in dynamic call() escape hatch for uncovered ops (#365)
 aws-core/src/dynamodb.zap      PARKED hand-written DynamoDB oracle (byte-diff fixture)
 aws-core/src/s3.zap            PARKED hand-written S3 oracle (byte-diff fixture)
 tests/sigv4_vectors.main.zap   offline SigV4 conformance vs AWS's published vectors
