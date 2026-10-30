@@ -667,3 +667,107 @@ repo), and `zap ir tests/dynamic_call.main.zap` type-checks the full dynamic pat
 (module + imports + the cross-module `PathMode` value + the `match` dispatch)
 clean. `tools/verify_vectors.py` is green on the vectors the test anchors on. CI
 (`ghcr.io/zaplang-io/zap:latest`) is the authoritative compile+run gate.
+
+## D-0008 — smithy-rpc-v2-cbor codec: aws-core foundation, emitter deferred (2026-10-30)
+
+**Status:** accepted (ticket #428, part 1). aws-core foundation half; the
+aws-codegen emitter + `models/manifest.json` entries for the 25 cbor-only
+services are a deliberate follow-up queued behind the aws-codegen lane.
+
+**Governing decisions.** D-0011 §2 (aws-core owns the protocol codecs); aws-codegen
+D-0001 (generated-is-product; aws-core is the runtime those clients ride on AND
+the byte-diff oracle). Follows the aws.query / aws.awsjson / aws.restxml codec
+shape and D-0002..D-0006 as additive aws-core surface — no signing, endpoint, or
+existing-codec path changes.
+
+**Context.** smithy-rpc-v2-cbor is AWS's newest RPC protocol: a POST to
+`/service/{ServiceName}/operation/{OperationName}` whose body is the operation
+input serialized as a CBOR (RFC 8949) data item, with `smithy-protocol:
+rpc-v2-cbor`, `Accept: application/cbor`, and (body-present) `Content-Type:
+application/cbor`. It is the sixth protocol; 25 services currently excluded from
+the manifest speak only it (CloudWatch moved query→cbor upstream, Translate, and
+others). #365's `aws_core.dynamic` escape hatch reaches them today by hand-framing
+CBOR; this is the real codec that replaces the hand-framing, flagged by #365 as
+the proper fix.
+
+**Decision.** A new `aws_core.cbor` module is the protocol-agnostic codec, driven
+by the CALLER's value model exactly as aws.query is driven by caller-supplied
+parameters (this layer never guesses a member name). New public surface:
+
+- `enum CborValue { Int, Bool, Null, Text, Blob, Double, Single, Timestamp, List,
+  Map }` — the rpc-v2-cbor value model (`Map` carries parallel key/value lists:
+  structures ARE maps keyed by member name). Constructor helpers `cbor_int` /
+  `cbor_text` / `cbor_bool` / `cbor_null` / `cbor_blob` / `cbor_double` /
+  `cbor_single` / `cbor_timestamp` / `cbor_list` / `cbor_map` are the builder.
+- `cbor_encode(CborValue) -> bytes` — canonical CBOR, mirroring botocore's
+  RpcV2CBORSerializer: definite-length strings/blobs/lists/maps; struct members as
+  a map keyed by the text-string member name in MODEL order (botocore does NOT
+  sort keys; absent/null members are omitted by the caller, matching botocore's
+  `{k: v for ... if v is not None}`); integers in the shortest 1/2/3/5/9-byte
+  form; timestamps as CBOR tag 1 over integer epoch-seconds (`unixtimestamp`);
+  floats as IEEE-754 (major 7, ai 27 double / ai 26 float), with inf/-inf/NaN as
+  the half-float forms botocore emits. Because the language has no float↔bits
+  primitive, the IEEE-754 packing is done by hand from integer/float arithmetic;
+  it is byte-identical to `struct.pack` for exactly-representable values (what the
+  vectors use) and follows IEEE round-to-nearest otherwise.
+- `cbor_uri` / `cbor_content_type` / `cbor_headers` / `cbor_build_request` — the
+  rpc-v2-cbor framing (path, the smithy-protocol / Accept / Content-Type headers,
+  the x-amz-content-sha256 over the CBOR body).
+- `cbor_sign(creds, req, body, amz_date, date_stamp) -> bytes` and
+  `cbor_signature(...) -> str` — SigV4 over the CBOR body, the pattern
+  `binding.binding_sign` established for a bytes/pre-encoded body: it reuses every
+  core SigV4 primitive (`canonical_headers` / `canonical_request` /
+  `string_to_sign` / `signing_key` / `sign` / `authorization_header`) unchanged,
+  so the signature is byte-identical to the generated/oracle path and the pinned
+  SigV4 vectors are untouched.
+- Response decode — `cbor_decode(bytes) -> CborValue`, the accessors
+  `cbor_map_get` / `cbor_as_text` / `cbor_as_int` / `cbor_as_bool` /
+  `cbor_as_timestamp` / `cbor_list_len` / `cbor_list_at`, and error dispatch
+  `cbor_error(status, body) -> Optional[core.AwsError]` (plus `cbor_error_type` /
+  `cbor_error_message`) surfacing the fault map's `__type` / `message` for the
+  #361 typed-error map.
+
+**A CBOR body is bytes, not a str.** Unlike JSON/XML/query, a CBOR body is genuine
+binary. The encoder returns `bytes` (built via a `list[int64]` accumulator —
+`bytes` has no `+`), and decode/error dispatch TAKE `bytes`, not
+`core.Response.body` (a `str`): `bytes(str)` is a UTF-8 ENCODE, not a reinterpret,
+and there is no str→bytes reinterpret in the language, so a CBOR body cannot
+round-trip through a str. The deferred transport/emitter half hands the raw
+response body here as bytes. This is the one shape difference from the str-bodied
+codecs and the reason signing is a dedicated `cbor_sign` over bytes rather than a
+call into `core.sign_request` (whose body parameter is a str).
+
+**Scope — foundation only.** This ticket adds the codec, framing, decode and the
+byte-diff oracle. It does NOT touch the aws-codegen generator/emitter or
+`models/manifest.json`; wiring the 25 cbor services (an emitter that walks a
+service model and calls `cbor_map`/`cbor_list`/… , plus the manifest entries) is
+part 2, queued behind the aws-codegen lane so it does not collide with the
+in-flight #425 HTTP-binding work. Event-stream framing (the
+`application/vnd.amazon.eventstream` Accept variant) is out of scope.
+
+**Verification.** The CBOR bytes are the byte-diff oracle. The pinned vectors — a
+hand-rolled struct exercising every value kind (nested list/map/blob/timestamp)
+plus two representative cbor-only ops, CloudWatch `PutMetricData` and Translate
+`TranslateText` — were cross-checked against **botocore's own RpcV2CBORSerializer**
+when authored (driving botocore's `CBORSerializer` over constructed shapes); the
+pinned bytes ARE botocore's output. `tools/verify_vectors.py` gains a
+`cbor_codec` entry: an independent, pure-stdlib canonical-CBOR encoder that
+re-derives the whole `tests/expected/cbor_codec.expected` fixture (bytes +
+framing + the SigV4 signature, via the file's existing signer) toolchain-free, so
+the fixture stays honest on a runner with no botocore (ran green). The Zap entry
+`tests/cbor_codec.main.zap` reproduces the same bytes through `aws_core.cbor` and
+is run by `tools/run-tests.sh` under the real toolchain in CI.
+
+**Docker was NOT run** (it kernel-panics the dev host, standing rule). Host
+validation: a front-end-only `zap` built from a detached `origin/main` worktree
+(`cargo build -p zapc --bin zap`, no LLVM) passed `zap fmt --check` on
+`aws-core/src tests examples` and `zap ir tests/cbor_codec.main.zap` (cross-package
+type-check of the module + its imports through the materialized zenv) with no
+diagnostics; the Python oracle re-derivation ran green. CI
+(`ghcr.io/zaplang-io/zap:latest`) is the authoritative compile+run gate.
+
+**Follow-up (aws-codegen).** The emitter walks each cbor service's model and emits
+per-operation serialize/deserialize that builds a `CborValue` tree and calls
+`cbor_encode` / `cbor_decode`, plus the manifest entries for the 25 services. The
+real vectors here (the CloudWatch / Translate shapes) are the shape that generator
+must reproduce byte-for-byte against this oracle.

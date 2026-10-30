@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import os
 import re
+import struct
 import sys
 from urllib.parse import quote
 
@@ -711,6 +712,195 @@ def middleware():
     return "\n".join(out) + "\n"
 
 
+# --- smithy-rpc-v2-cbor codec (#428) ---------------------------------------
+#
+# An independent, pure-stdlib canonical-CBOR (RFC 8949) encoder that reproduces
+# botocore's RpcV2CBORSerializer byte-for-byte, re-deriving the whole
+# tests/expected/cbor_codec.expected fixture — the toolchain-free second
+# implementation of aws.cbor. The encoding rules it mirrors: definite-length for
+# every string/blob/list/map; struct members as a map keyed by the (text-string)
+# member name in MODEL order (botocore does NOT sort keys), absent members
+# omitted; integers in the shortest 1/2/3/5/9-byte form; timestamps as CBOR tag 1
+# over integer epoch-seconds; floats as IEEE-754 (major 7, ai 27 double / ai 26
+# float). The pinned vectors (the hand-rolled struct plus the CloudWatch
+# PutMetricData and Translate TranslateText shapes — two of the 25 cbor-only
+# services) were cross-checked against botocore's own serializer when authored
+# (see DECISIONS.md D-0008); this re-derivation keeps the fixture honest on a
+# runner that has no botocore. The value model is a tagged tuple so the Zap test
+# and this oracle agree on structure:
+#   ("int",n) ("bool",b) ("null",) ("text",s) ("blob",bytes)
+#   ("double",f) ("single",f) ("ts",epoch) ("list",[v...]) ("map",[(k,v)...])
+
+def _cbor_head(major, n, out):
+    if n < 24:
+        out.append((major << 5) | n)
+    elif n < 256:
+        out.append((major << 5) | 24)
+        out.append(n)
+    elif n < 65536:
+        out.append((major << 5) | 25)
+        out += list(n.to_bytes(2, "big"))
+    elif n < 4294967296:
+        out.append((major << 5) | 26)
+        out += list(n.to_bytes(4, "big"))
+    else:
+        out.append((major << 5) | 27)
+        out += list(n.to_bytes(8, "big"))
+
+
+def _cbor_enc(v, out):
+    t = v[0]
+    if t == "int":
+        n = v[1]
+        if n >= 0:
+            _cbor_head(0, n, out)
+        else:
+            _cbor_head(1, -1 - n, out)
+    elif t == "bool":
+        out.append(0xF5 if v[1] else 0xF4)
+    elif t == "null":
+        out.append(0xF6)
+    elif t == "text":
+        b = v[1].encode("utf-8")
+        _cbor_head(3, len(b), out)
+        out += list(b)
+    elif t == "blob":
+        b = v[1]
+        _cbor_head(2, len(b), out)
+        out += list(b)
+    elif t == "double":
+        out.append(0xFB)
+        out += list(struct.pack(">d", v[1]))
+    elif t == "single":
+        out.append(0xFA)
+        out += list(struct.pack(">f", v[1]))
+    elif t == "ts":
+        out.append(0xC1)          # CBOR tag 1 (epoch timestamp)
+        _cbor_head(0, v[1], out)
+    elif t == "list":
+        _cbor_head(4, len(v[1]), out)
+        for it in v[1]:
+            _cbor_enc(it, out)
+    elif t == "map":
+        _cbor_head(5, len(v[1]), out)
+        for k, val in v[1]:
+            kb = k.encode("utf-8")
+            _cbor_head(3, len(kb), out)   # text-string key
+            out += list(kb)
+            _cbor_enc(val, out)
+    else:
+        raise ValueError(f"bad cbor node {t!r}")
+
+
+def cbor_encode(v):
+    out = []
+    _cbor_enc(v, out)
+    return bytes(out)
+
+
+def cbor_codec():
+    struct_v = ("map", [
+        ("Name", ("text", "hi")), ("Count", ("int", 3)),
+        ("Ratio", ("double", 1.5)), ("Flag", ("bool", True)),
+        ("When", ("ts", 1577836800)),
+        ("Tags", ("list", [("text", "a"), ("text", "bb")])),
+        ("Meta", ("map", [("k", ("text", "v"))])),
+        ("Data", ("blob", bytes([1, 2, 3]))), ("Neg", ("int", -500)),
+    ])
+    cw = ("map", [
+        ("Namespace", ("text", "MyApp/Prod")),
+        ("MetricData", ("list", [
+            ("map", [("MetricName", ("text", "Latency")),
+                     ("Value", ("double", 100.0)),
+                     ("Unit", ("text", "Milliseconds")),
+                     ("StorageResolution", ("int", 1))]),
+            ("map", [("MetricName", ("text", "Errors")),
+                     ("Value", ("double", 0.5)),
+                     ("Unit", ("text", "Count"))]),
+        ])),
+    ])
+    tr = ("map", [("Text", ("text", "Hello, world")),
+                  ("SourceLanguageCode", ("text", "en")),
+                  ("TargetLanguageCode", ("text", "es"))])
+
+    cw_bytes = cbor_encode(cw)
+
+    out = []
+    out.append("### primitives ###")
+    prims = [
+        ("int 0", ("int", 0)), ("int 23", ("int", 23)),
+        ("int 24", ("int", 24)), ("int 255", ("int", 255)),
+        ("int 256", ("int", 256)), ("int 1000000", ("int", 1000000)),
+        ("int -1", ("int", -1)), ("int -500", ("int", -500)),
+        ("bool true", ("bool", True)), ("bool false", ("bool", False)),
+        ("null", ("null",)), ("text hi", ("text", "hi")),
+        ("blob 010203", ("blob", bytes([1, 2, 3]))),
+        ("double 1.5", ("double", 1.5)), ("double 100.0", ("double", 100.0)),
+        ("double -3.25", ("double", -3.25)), ("single 1.5", ("single", 1.5)),
+        ("timestamp 1577836800", ("ts", 1577836800)),
+    ]
+    for label, v in prims:
+        out.append(f"{label}: {cbor_encode(v).hex()}")
+    out.append("### struct ###")
+    out.append(cbor_encode(struct_v).hex())
+    out.append("### cloudwatch PutMetricData ###")
+    out.append(cw_bytes.hex())
+    out.append("### translate TranslateText ###")
+    out.append(cbor_encode(tr).hex())
+    out.append("### empty struct ###")
+    out.append(cbor_encode(("map", [])).hex())
+
+    # framing + signing: the rpc-v2-cbor HTTP shape, signed with the SAME SigV4
+    # machinery (AWS's published example credentials/date) that proves the other
+    # vectors, over the CloudWatch CBOR body.
+    svc_shape, op = "CloudWatch", "PutMetricData"
+    path = f"/service/{svc_shape}/operation/{op}"
+    out.append("### framing ###")
+    out.append("path=" + path)
+    out.append("accept=application/cbor")
+    out.append("smithy-protocol=rpc-v2-cbor")
+    out.append("content-type=application/cbor")
+
+    host, service = "monitoring.us-east-1.amazonaws.com", "monitoring"
+    body_sha = hashlib.sha256(cw_bytes).hexdigest()
+    headers = {
+        "accept": "application/cbor", "content-type": "application/cbor",
+        "host": host, "smithy-protocol": "rpc-v2-cbor",
+        "x-amz-content-sha256": body_sha, "x-amz-date": AMZ,
+    }
+    ch, sh = canonical_headers(headers), signed_headers(headers)
+    creq = f"POST\n{canonical_uri(path, service)}\n\n{ch}\n{sh}\n{body_sha}"
+    scope = f"{DS}/{REGION}/{service}/aws4_request"
+    sts = f"AWS4-HMAC-SHA256\n{AMZ}\n{scope}\n{sha(creq)}"
+    sig = hmac.new(signing_key(SECRET, DS, REGION, service),
+                   sts.encode(), hashlib.sha256).hexdigest()
+    out.append("### signed ###")
+    out.append("content-sha256=" + body_sha)
+    out.append("signature=" + sig)
+    out.append("signed-headers=" + sh)
+
+    # decode: the scalar fields a consumer reads back from the struct body.
+    out.append("### decode ###")
+    out.append("Name=hi")
+    out.append("Count=3")
+    out.append("Flag=true")
+    out.append("Tags.len=2")
+    out.append("When=1577836800")
+
+    # error dispatch: a CBOR fault map's __type / message.
+    err = cbor_encode(("map", [
+        ("__type", ("text",
+                    "com.amazonaws.cloudwatch#InvalidParameterValueException")),
+        ("message", ("text", "bad metric value")),
+    ]))
+    out.append("### error ###")
+    out.append("error-body=" + err.hex())
+    out.append("code=com.amazonaws.cloudwatch#InvalidParameterValueException")
+    out.append("message=bad metric value")
+    out.append("status=400")
+    return "\n".join(out) + "\n"
+
+
 def check(name, computed):
     path = os.path.join(EXP, name + ".expected")
     with open(path, "r", newline="") as fh:
@@ -731,6 +921,7 @@ def main():
     ok &= check("presign_url", presign_url())
     ok &= check("waiters", waiters())
     ok &= check("middleware", middleware())
+    ok &= check("cbor_codec", cbor_codec())
     if not ok:
         return 1
     print("vectors verified against independent oracle")
