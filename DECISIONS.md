@@ -933,3 +933,107 @@ ZIR with no diagnostics; the boto3 oracle generator re-derived green and its
 Python mirror byte-matches boto3 on all 20 vectors with the round-trip identity
 holding. CI (`ghcr.io/zaplang-io/zap:latest`) is the authoritative compile+run
 gate.
+
+## D-0011 — paginators are a generic lazy page-iterator engine in aws-core (2026-10-30)
+
+**Status:** accepted (ticket #436, ergonomics epic #432).
+
+**Governing decisions.** zaplang-io/zap D-0011 §7 (aws-core owns the
+request-lifecycle seams — retry, waiting, and now pagination; cited by its home id
+to disambiguate from this local entry); zaplang-io/zap#429 (generators-as-methods:
+`yield` in a `self`-bearing method lowers to the iterator state machine);
+aws-codegen D-0001 (generated-is-product; aws-core is the runtime those clients
+ride on). Follows D-0004 (waiters) as the paginator analogue of the waiter engine,
+and is purely additive.
+
+**Context.** A paginator walks every page of a paginated listing without the
+caller threading continuation tokens by hand (boto3's
+`client.get_paginator('op').paginate(...)`, which the maintainer uses heavily).
+botocore models each paginated op in `paginators-1.json` as `{input_token,
+output_token, result_key, limit_key?, more_results?}`: `output_token` is read from
+each response and written to the next request's `input_token`; `result_key` is the
+response field holding the page's result list; `limit_key` is the page-size input;
+`more_results`, when present, is a response boolean that gates continuation. The
+walk stops when `output_token` is absent/empty (and, when modeled, `more_results`
+is false). The aws-codegen generator already emits per-op `paginate_<op>`
+generator methods inline (aws-codegen I#349), each re-deriving this same loop from
+`paginators-1.json` — the duplication D-0004's waiter decision anticipates folding
+into a shared engine.
+
+**Decision.** The capability is added as a new **generic** module
+`aws_core.paginators` — the ENGINE only, mirroring `aws_core.waiters`. Per-op
+config is supplied by the CALLER (or a generated per-op shim; see the follow-up);
+the engine is service-agnostic. New public surface:
+
+- `struct PaginatorConfig { str input_token; str output_token; str result_key;
+  str limit_key; str more_results }` — the `paginators-1.json` shape. The engine
+  reads `output_token` / `result_key` / `more_results`; `input_token` / `limit_key`
+  are what the fetch CLOSURE applies to each request (carried here so a generated
+  shim can construct the whole model in one place, exactly as `WaiterConfig`
+  carries the full acceptor table). `paginator_config(input_token, output_token,
+  result_key)` is the common-case constructor (no limit/more-results gate), which
+  is the aws-codegen qualification gate: a single string token plus a result key.
+- `struct Paginator { PaginatorConfig config; fn(str) -> Response fetch }` and the
+  constructor `paginator(cfg, fetch) -> Paginator`. The `fn(str) -> Response`
+  fetch seam mirrors aws.retry's `fn() -> Response` and aws.waiters' `fn() -> Poll`:
+  given the continuation token ("" for the first page), the closure writes it into
+  `input_token` (and applies `limit_key`), calls the generated operation, and
+  returns its `Response`. Which operation to call and how to sign it is the
+  closure's job — the engine stays independent of any service's request builders,
+  the same way `operation` is deliberately unmodeled in aws.waiters.
+- Generator methods `pages(self)` and `items(self)` — the boto3 `.paginate(...)`
+  analogue and its item-level iteration. `pages` yields each page `Response`,
+  threading `output_token` -> the next token; `items` yields each `result_key`
+  element across all pages, lazily. Both lower to the iterator state machine via
+  zaplang-io/zap#429 (the prerequisite), the exact shape the generated clients'
+  per-op paginators emit. A function-typed field is called by binding it to a
+  `fn(...)`-annotated local first (`fn(str) -> Response fetch = self.fetch`), the
+  always-valid form aws.middleware uses (I#163/D-0067). `items` inlines the page
+  loop rather than iterating `self.pages()`, so each is one flat generator.
+- `all_pages(p) -> list[Response]` and `all_items(p) -> list[JsonValue]` — eager
+  accumulators (boto3 `build_full_result` territory). `all_items` is the merged
+  result list for the common single-result-key paginator.
+
+**Config-sourcing seam.** The engine is generic and hand-written in aws-core; the
+per-op config comes from `paginators-1.json`, which lives in the **aws-codegen**
+repo, not here. This PR keeps that config at the CALLER: `PaginatorConfig` is
+constructed by whoever drives the paginator (the test fixtures stand in for it,
+as the real waiter fixtures do for waiter tables). No `paginators-1.json` is read
+or emitted in this repo, so the PR stays single-repo (aws). Reading the token from
+the response reuses aws.core's existing `next_page_json` awsJson hook; `result_key`
+/ `more_results` are read over a `json.loads` `JsonValue` DOM (the same prelude
+enum aws.waiters walks), so item iteration and the gate stay codec-independent.
+
+**Parsed-response seam.** `result_key` is dotted field access over the DOM (no
+projections — simpler than waiter JMESPath); `more_results` is a top-level boolean.
+This is additive — no signing, codec, or byte-diff oracle behavior changes.
+
+**Verification.** Behavioral, without the Zap toolchain/Docker (Docker crashes the
+maintainer's host, so the local LLVM/Docker gate was skipped). `tests/paginators.main.zap`
+drives the engine through its `fn(str) -> Response` fetch seam with an injected
+fake client returning canned multi-page bodies (page 1 carries a token, page 2
+does not), asserting both pages / all items are yielded, the threaded tokens, and
+termination; plus the single-page (no-token) case and an S3 `IsTruncated`
+`more_results` gate where a page carries a token yet stops the walk. The fixtures
+are real paginator configs (DynamoDB `ListTables`, S3 `ListObjectsV2`). The pinned
+`tests/expected/paginators.expected` was produced by an independent Python mirror
+of the engine (the same `json_string_field` naive-scan + loop), not hand-guessed,
+since the host build has no codegen. A throwaway detached `origin/main`
+`cargo build -p zapc` front-end ran `zap fmt --check` clean on the module + test
+and `zap ir tests/paginators.main.zap` (full type-check through the materialized
+zenv, including the generator methods and the function-typed-field call) emitted
+ZIR with no diagnostics. CI (`ghcr.io/zaplang-io/zap:latest`) is the authoritative
+compile+run gate.
+
+**Follow-up (aws-codegen).** aws-codegen I#349 already emits per-op `paginate_<op>`
+generator methods that inline this loop. The follow-up is to have the generator
+emit, per paginated op, a `PaginatorConfig` (from `paginators-1.json`) plus a thin
+`paginate_<op>(self, input)` that builds the fetch closure (set `input_token` /
+`limit_key`, call the op) and returns `paginators.paginator(cfg, closure).pages()`
+— collapsing the duplicated inline loops onto this shared engine, exactly as the
+waiter-table follow-up (D-0004) collapses onto `aws_core.waiters.wait`. Tracked as
+an aws-codegen follow-up; the fixtures in `tests/paginators.main.zap` are the shape
+that generated config must reproduce. A richer token model (parallel-list or map
+tokens, e.g. DynamoDB Query/Scan `ExclusiveStartKey`) and a full
+`build_full_result` that merges every output field (not just the result list) are
+later work.
