@@ -153,6 +153,13 @@ def next_token(PaginatorConfig cfg, str body) -> str:
 # The paginator: a config + the fetch closure, iterated as a generator method
 # ---------------------------------------------------------------------------
 
+# One step of the walk: the page `Response` plus the continuation token for the
+# next call ("" when the walk should stop). Returned by `step` so the generator
+# methods carry only plain data across each `yield`, never the fetch closure.
+struct PageStep:
+    core.Response response
+    str next_token
+
 # A ready-to-iterate paginator. `fetch(token)` makes one call ("" token = first
 # page) and returns its `Response`; the engine threads `output_token` ->
 # `input_token` across calls. Mirrors aws.waiters' `WaiterConfig` + `fn() -> Poll`,
@@ -161,42 +168,55 @@ struct Paginator:
     PaginatorConfig config
     fn(str) -> core.Response fetch
 
+    # One page call + next-token computation. The function-typed field is called
+    # here, in a PLAIN method — never from inside a generator frame: a generator
+    # that yields across a stored-closure call is an untested lowering, so `pages`
+    # / `items` reach the closure only through this sibling-method call (the shape
+    # the generated clients' paginators use — call helpers, not frame closures).
+    # The field is bound to a `fn(...)`-annotated local before the call, as
+    # aws.middleware does (I#163/D-0067).
+    def step(self, str token) -> PageStep:
+        fn(str) -> core.Response fetch = self.fetch
+        auto resp = fetch(token)
+        return PageStep(response=resp, next_token=next_token(self.config, resp.body))
+
     # Yield each page's `Response` in order, threading the continuation token. The
     # first call uses an empty token; each subsequent call carries the previous
     # response's `output_token`. Stops when the token is absent/empty (or a modeled
     # `more_results` gate is false). boto3: `for page in paginator.paginate(...)`.
     def pages(self):
-        # The function-typed field is bound to a `fn(...)`-annotated local before
-        # the call (I#163/D-0067: a value retrieved from a struct field is
-        # re-attached to its signature by the annotation), as aws.middleware does.
-        fn(str) -> core.Response fetch = self.fetch
+        # Next-token threading and the stop decision happen BEFORE the `yield`, so
+        # only `self` and scalar locals (`token`, `more`) are live across the
+        # suspend point — the shape the generator-method lowering is exercised with
+        # (zaplang-io/zap#429). `st` is dead after the yield expression.
         auto token = ""
         auto more = True
         while more:
-            auto page = fetch(token)
-            yield page
-            auto tok = next_token(self.config, page.body)
-            if len(tok) > 0:
-                token = tok
+            auto st = self.step(token)
+            auto nt = st.next_token
+            if len(nt) > 0:
+                token = nt
             else:
                 more = False
+            yield st.response
 
     # Yield each element of `result_key` across every page, lazily (boto3's
     # item-level iteration / `.search(result_key)`). The page loop is inlined
-    # rather than iterating `self.pages()` so this is a single flat generator.
+    # rather than iterating `self.pages()` so this is a single flat generator; the
+    # stop decision is made before the inner yield loop (as in `pages`).
     def items(self):
-        fn(str) -> core.Response fetch = self.fetch
         auto token = ""
         auto more = True
         while more:
-            auto page = fetch(token)
-            for it in result_items(self.config.result_key, page.body):
-                yield it
-            auto tok = next_token(self.config, page.body)
-            if len(tok) > 0:
-                token = tok
+            auto st = self.step(token)
+            auto nt = st.next_token
+            auto page_items = result_items(self.config.result_key, st.response.body)
+            if len(nt) > 0:
+                token = nt
             else:
                 more = False
+            for it in page_items:
+                yield it
 
 # Construct a `Paginator` from a config and a fetch closure. The boto3
 # `client.get_paginator('op')` analogue: `paginator(cfg, fetch).pages()` is

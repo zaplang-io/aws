@@ -43,16 +43,12 @@ def fake_call(Fake f, str token) -> core.Response:
         b = f.bodies[i]
     return core.Response(status=200, headers={}, body=b)
 
-# Build a paginator over a fresh fake client for `bodies`. Returned with the fake
-# so the test can read back the threaded tokens. A fresh fake per paginator keeps
-# each iteration independent (the cursor is stateful).
-def over(
-    paginators.PaginatorConfig cfg,
-    list[str] bodies,
-) -> (paginators.Paginator, Fake):
-    auto f = new_fake(bodies)
+# Build a paginator over a fake client `f`. A fresh fake per paginator keeps each
+# iteration independent (the cursor is stateful); the caller holds `f` separately
+# so it can read back the threaded tokens after draining the iterator.
+def over(paginators.PaginatorConfig cfg, Fake f) -> paginators.Paginator:
     fn(str) -> core.Response fetch = lambda tok: fake_call(f, tok)
-    return (paginators.paginator(cfg, fetch), f)
+    return paginators.paginator(cfg, fetch)
 
 # --- real paginator configs -------------------------------------------------
 
@@ -106,18 +102,19 @@ def show_items(list[JsonValue] items) -> str:
         parts.append(show_item(it))
     return " ".join(parts)
 
+# The DynamoDB ListTables two-page script: page 1 carries LastEvaluatedTableName
+# "b", page 2 omits it (end). A fresh list per call so each fake is independent.
+def ddb_two_pages() -> list[str]:
+    return [
+        "{\"TableNames\": [\"a\", \"b\"], \"LastEvaluatedTableName\": \"b\"}",
+        "{\"TableNames\": [\"c\"]}",
+    ]
+
 def main():
     # --- multi-page: page 1 carries a token, page 2 does not ---------------
     print("== multi-page ==")
-    auto mp = over(
-        ddb_list_tables(),
-        [
-            "{\"TableNames\": [\"a\", \"b\"], \"LastEvaluatedTableName\": \"b\"}",
-            "{\"TableNames\": [\"c\"]}",
-        ],
-    )
-    auto mpp = mp[0]
-    auto mpf = mp[1]
+    auto mpf = new_fake(ddb_two_pages())
+    auto mpp = over(ddb_list_tables(), mpf)
     auto npages = 0
     for page in mpp.pages():
         npages = npages + 1
@@ -125,57 +122,43 @@ def main():
     print("tokens " + show_tokens(mpf))
 
     # Item-level iteration over the same config (fresh fake).
-    auto mi = over(
-        ddb_list_tables(),
-        [
-            "{\"TableNames\": [\"a\", \"b\"], \"LastEvaluatedTableName\": \"b\"}",
-            "{\"TableNames\": [\"c\"]}",
-        ],
-    )
+    auto mif = new_fake(ddb_two_pages())
+    auto mip = over(ddb_list_tables(), mif)
     list[JsonValue] mitems = []
-    for it in mi[0].items():
+    for it in mip.items():
         mitems.append(it)
     print("items " + show_items(mitems))
 
     # --- single-page: no token, one call -----------------------------------
     print("== single-page ==")
-    auto sp = over(ddb_list_tables(), ["{\"TableNames\": [\"x\", \"y\"]}"])
+    auto spf = new_fake(["{\"TableNames\": [\"x\", \"y\"]}"])
+    auto spp = over(ddb_list_tables(), spf)
     auto sppages = 0
-    for page in sp[0].pages():
+    for page in spp.pages():
         sppages = sppages + 1
     print("pages " + str(sppages))
-    print("tokens " + show_tokens(sp[1]))
+    print("tokens " + show_tokens(spf))
 
     # --- more_results gate: token present but IsTruncated=false stops ------
     print("== more-results gate ==")
-    auto mr = over(
-        s3_list_objects(),
+    auto mrf = new_fake(
         [
             "{\"Contents\": [\"k1\"], \"IsTruncated\": true, \"NextContinuationToken\": \"t1\"}",
             "{\"Contents\": [\"k2\"], \"IsTruncated\": false, \"NextContinuationToken\": \"t2\"}",
         ],
     )
+    auto mrp = over(s3_list_objects(), mrf)
     auto mrpages = 0
-    for page in mr[0].pages():
+    for page in mrp.pages():
         mrpages = mrpages + 1
     print("pages " + str(mrpages))
-    print("tokens " + show_tokens(mr[1]))
+    print("tokens " + show_tokens(mrf))
 
     # --- eager accumulators (build_full_result territory) -------------------
     print("== accumulators ==")
-    auto ap = over(
-        ddb_list_tables(),
-        [
-            "{\"TableNames\": [\"a\", \"b\"], \"LastEvaluatedTableName\": \"b\"}",
-            "{\"TableNames\": [\"c\"]}",
-        ],
-    )
-    print("all_pages " + str(len(paginators.all_pages(ap[0]))))
-    auto ai = over(
-        ddb_list_tables(),
-        [
-            "{\"TableNames\": [\"a\", \"b\"], \"LastEvaluatedTableName\": \"b\"}",
-            "{\"TableNames\": [\"c\"]}",
-        ],
-    )
-    print("all_items " + show_items(paginators.all_items(ai[0])))
+    auto apf = new_fake(ddb_two_pages())
+    auto app = over(ddb_list_tables(), apf)
+    print("all_pages " + str(len(paginators.all_pages(app))))
+    auto aif = new_fake(ddb_two_pages())
+    auto aip = over(ddb_list_tables(), aif)
+    print("all_items " + show_items(paginators.all_items(aip)))
