@@ -170,7 +170,7 @@ def chain_of(list[Interceptor] interceptors) -> Chain:
 # Return a copy of `c` with `ic` appended as the new innermost layer. Copy-on-add
 # so a chain value is never mutated under a caller that still holds it.
 def chain_add(Chain c, Interceptor ic) -> Chain:
-    auto next = c.interceptors.copy()
+    list[Interceptor] next = [x for x in c.interceptors]
     next.append(ic)
     return Chain(interceptors=next)
 
