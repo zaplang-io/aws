@@ -455,3 +455,123 @@ the 88-column canonical form) plus the Python oracle, and CI (the
 for interceptors that answer a request without transport. (2) Wiring the chain
 into the generated per-service clients (aws-codegen) so a client carries a default
 Chain. Both tracked as follow-ups; the engine here is the service-agnostic base.
+
+## D-0006 — typed service errors: an open error enum + a base carrier, dispatched by `match` (2026-10-30)
+
+**Status:** accepted (ticket #361, AWS typed errors). aws-core foundation half;
+the aws-codegen emission half is a deliberate follow-up gated on #364.
+
+**Governing decisions.** D-0011 §7 (aws-core owns the request-lifecycle seams,
+error dispatch among them); aws-codegen D-0001 (generated-is-product; aws-core is
+the runtime those clients ride on and the byte-diff oracle). zap I#51/D-0046
+(enums with payload variants + exhaustive `match`) and zap I#22/D-0007/D-0029 +
+I#383/I#401 (exceptions: `raise`/`try`/`except`/`finally`, with built-in faults
+made catchable). Purely additive — like D-0002/D-0003/D-0004/D-0005 it adds
+surface and touches no signing/codec/oracle path.
+
+**Context.** `core.parse_error` surfaces a flat `AwsError { code, message, status }`
+from any non-2xx `Response`. That is the string-matching baseline: a caller tells
+`NoSuchKey` from `NoSuchBucket` by comparing `err.code` to a string literal. #361
+asks for typed errors so a caller branches on the *kind* of error instead of
+string-matching a code.
+
+**What the language actually supports today (this shaped the model).** Probed
+against the compiler, not assumed:
+- Enums with payload variants + exhaustive `match` are fully shipped. A mixed
+  enum (bare variants + an `Unknown(str code)` payload variant) compiles, and the
+  `match` is exhaustiveness-checked.
+- Exceptions `raise`/`try`/`except`/`finally` are shipped, but with two limits
+  that are deferred in the compiler (`crates/ir/src/lower.rs`): (a) `raise` lowers
+  only a **str** message (`raise` of a typed payload is rejected), and (b) `except`
+  matching is **catch-all** — the clause's type is parsed but ignored, the first
+  clause wins, and `as e` binds the message *string*. So type-directed
+  `except NoSuchKey:` dispatch does not exist yet.
+- Enum variant patterns resolve on a **two-segment** `Enum.Variant` path only
+  (sema `check_qualified_pattern`, lowering `variant_cond` key on the first path
+  segment). A caller's own `match` with a module-qualified `s3.S3ErrorKind.NoSuchKey`
+  pattern is three segments and is NOT resolved — only a `match` written *inside*
+  the module that defines the enum is portable today. (Cross-module enum *value*
+  construction and value-passing DO work, as the existing `binding.PayloadKind`
+  usages show.)
+
+So typed *dispatch* is delivered the way the language supports now — an open enum
++ an exhaustive `match` that lives in the service module — not multiple `except`
+clauses. The exception path is provided as a thin bridge (below) for the
+single-handler ergonomic.
+
+**Decision.** A new `aws_core.errors` module holds the service-agnostic base, and
+each service owns its typed-error enum + classifier (generated; hand-wired for S3
+here as the proof). New public surface:
+
+- `struct AwsServiceError { str code; str message; str request_id; int64
+  http_status }` — the base carrier: `core.AwsError` plus the request id. A plain
+  value a caller inspects (the unwinder cannot carry a struct yet).
+- `error_code(raw) -> str` — normalize a raw code to the bare shape name
+  (`split(':',1)[0]` then `rsplit('#',1)[-1]`, via a local `last_index` since
+  there is no `str.rfind`), so `com.amazonaws.s3#AccessDenied` and `NoSuchKey:`
+  both match `AccessDenied` / `NoSuchKey`. Mirrors `awsjson.awsjson_strip_error_code`.
+- `request_id_of(resp)`, `service_error(e, resp)`, and
+  `service_error_from_response(resp) -> Optional[AwsServiceError]` — the last
+  wraps `core.parse_error` and, when the body carried no code (the rest-json case),
+  falls back to the `x-amzn-errortype` header. Request id read from
+  `x-amzn-requestid` then `x-amz-request-id`.
+- The exception bridge: `format_error(e) -> str` (the one-line
+  `"<code>: <message> (request-id=<id>, http-status=<n>)"`), `raise_error(e)`
+  (raises that message), and `check_response(resp)` (raise on a fault, return on a
+  2xx) — so `try: errors.check_response(resp) except ... as e:` works today.
+- The **per-service pattern** (documented in `errors.zap`, implemented for S3 in
+  `s3.zap`): an open enum `S3ErrorKind { <modeled...>, Unknown(str code) }`, a
+  classifier `s3_error_kind(code) -> S3ErrorKind` (normalizes then matches by name,
+  unmodeled → `Unknown(code)`), and a module-local exhaustive dispatcher
+  `s3_error_name(S3ErrorKind) -> str`. The `Unknown(code)` arm is forward
+  compatibility: a new service error lands there, never breaking a caller built
+  against an older model.
+
+**Caller usage today.** Classify a response, then dispatch through the typed value
+via the service's module-local helpers:
+`s3.s3_error_name(s3.s3_error_kind(errors.service_error_from_response(resp).unwrap().code))`,
+or catch via the raise bridge. The enum IS the substrate the two deferred compiler
+features will light up (inline caller `match` once module-qualified variant
+patterns resolve; `except S3ErrorKind.NoSuchKey:` once `except` is type-directed)
+with no change to the generated classifier.
+
+**Proof.** `tests/typed_errors.main.zap` (pinned in
+`tests/expected/typed_errors.expected`, run by `tools/run-tests.sh`) feeds canned
+responses — rest-xml `<Code>`, awsJson namespaced `__type`, a rest-json
+`x-amzn-errortype` header, and an unmodeled code — through the pipeline and
+asserts the right `S3ErrorKind` (including the `Unknown(code)` fallback), the
+carrier fields + `format_error`, that `check_response` does NOT raise on a 2xx,
+and that it raises a catchable formatted message on a fault.
+
+**Docker was not run** (it kernel-panics the dev host, standing rule) and the
+local `zap` debug build is ~80 commits behind main — it predates the
+qualified-type-parameter and `dict.get`→Optional syntax aws-core uses, so it
+cannot parse the import-based `.zap` files directly. Host validation followed the
+D-0005 precedent: a dequalified, inlined probe of the full pipeline
+(core.parse_error → errors → s3 classifier/`match` → raise/try/except, the two
+header `dict.get` reads stubbed) passed `zap ir` (type-check) and `zap fmt`, and
+every touched `.zap` is 88-column canonical by construction. CI
+(`ghcr.io/zaplang-io/zap:latest`) is the authoritative compile+run gate.
+
+**The generator contract (the #361 follow-up, GATED ON #364).** On top of this
+aws-core base, aws-codegen emits per service, into the service module, from the
+service's modeled error shapes:
+1. `enum <Service>ErrorKind:` — one bare variant per modeled error shape (variant
+   name = the shape name), plus a final `Unknown(str code)` catch-all.
+2. `def <service>_error_kind(str code) -> <Service>ErrorKind:` — `auto name =
+   errors.error_code(code)`, an `if name == "<Shape>": return
+   <Service>ErrorKind.<Shape>` per modeled shape, else `return
+   <Service>ErrorKind.Unknown(name)`.
+3. `def <service>_error_name(<Service>ErrorKind) -> str:` — an exhaustive,
+   module-local `match` rendering each variant's name (`Unknown` as
+   `"Unknown(" + c + ")"`). Module-local so the `match` is two-segment and
+   portable.
+Everything else (the `AwsServiceError` carrier, normalization, the header
+fallback, the raise/check bridge) is inherited from `aws_core.errors` and is NOT
+re-emitted. The byte-diff oracle is unaffected (errors are additive surface). The
+follow-up is gated on #364 (the broad codegen rollout) landing first, so the
+generator change does not collide with the in-flight regeneration. Two compiler
+follow-ups, when they land, remove the module-local-`match` constraint and unlock
+the fuller ergonomics, reusing the SAME generated enums: (a) module-qualified
+enum variant patterns in a caller's `match`; (b) type-directed `except` dispatch
+(and `raise` of a typed payload) so `except <Service>ErrorKind.<Shape>:` works.
