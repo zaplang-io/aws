@@ -553,3 +553,252 @@ def with_query_param(Request req, str param, str value) -> Request:
         headers=req.headers,
         body=req.body,
     )
+
+# ---------------------------------------------------------------------------
+# Streaming bodies + aws-chunked SigV4 (#358)
+# ---------------------------------------------------------------------------
+#
+# S3 large objects and multipart uploads stream the payload instead of buffering
+# it whole: the request body is split into chunks, each framed with its length
+# and a per-chunk SigV4 signature, and the content hash sent as the literal
+# sentinel STREAMING-AWS4-HMAC-SHA256-PAYLOAD. The chunk signatures form a
+# rolling chain — the seed is the request's own SigV4 signature, and each chunk
+# signs over the previous chunk's signature — so the stream cannot be reordered
+# or truncated without detection. This is the aws-chunked content-encoding.
+#
+# These additions are purely additive: the non-streaming `sign_request` path and
+# its pinned byte-diff fixtures are untouched. A streaming caller builds a normal
+# `Request` plus a `StreamingBody` and calls `sign_streaming_request`; the
+# receive side decodes a Transfer-Encoding: chunked response with
+# `decode_chunked`. The rolling-signature algorithm is re-derived independently by
+# the Python oracle (tools/verify_vectors.py) against AWS's published example.
+
+# The x-amz-content-sha256 sentinel that selects aws-chunked streaming: the body
+# is not hashed up front, each chunk carries its own signature instead.
+def streaming_content_sha() -> str:
+    return "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+
+# A streaming (aws-chunked) request body: the ordered payload chunks that will be
+# framed and signed on the wire. The trailing zero-length terminating chunk is
+# appended by the encoder, so `chunks` holds only the real data pieces.
+struct StreamingBody:
+    list[str] chunks
+
+# Build a StreamingBody from its ordered data chunks.
+def streaming_body(list[str] chunks) -> StreamingBody:
+    return StreamingBody(chunks=chunks)
+
+# The decimal total payload length across all chunks — the value for the
+# x-amz-decoded-content-length header (the length of the body AFTER aws-chunked
+# framing is stripped). Signed as part of the request.
+def decoded_content_length(list[str] chunks) -> str:
+    auto total = 0
+    for c in chunks:
+        total = total + len(c)
+    return str(total)
+
+# Lowercase hexadecimal of a non-negative integer, used for the per-chunk length
+# prefix on the wire (aws-chunked frames each chunk as "<hex-len>;...").
+def hex_lower(int64 n) -> str:
+    if n <= 0:
+        return "0"
+    auto digits = "0123456789abcdef"
+    auto s = ""
+    auto x = n
+    while x > 0:
+        auto d = x % 16
+        s = digits[d:d + 1] + s
+        x = x // 16
+    return s
+
+# The SigV4 chunk string-to-sign for one chunk (STREAMING-AWS4-HMAC-SHA256-
+# PAYLOAD):
+#   "AWS4-HMAC-SHA256-PAYLOAD" \n amz_date \n scope \n prev_sig \n
+#   hex(sha256("")) \n hex(sha256(chunk_data))
+# `prev_sig` is the previous signature in the chain (the request's seed signature
+# for the first chunk). The fifth line is always the hash of the empty string.
+def chunk_string_to_sign(
+    str amz_date,
+    str cred_scope,
+    str prev_sig,
+    str chunk_data,
+) -> str:
+    return "AWS4-HMAC-SHA256-PAYLOAD" + "\n" + amz_date + "\n" + cred_scope + "\n" + prev_sig + "\n" + crypto.sha256("") + "\n" + crypto.sha256(chunk_data)
+
+# One chunk's signature = HMAC-SHA256(signing_key, chunk_string_to_sign), hex.
+# `key` is the SigV4 signing key (from `signing_key`); `prev_sig` chains the roll.
+def chunk_signature(
+    bytes key,
+    str amz_date,
+    str cred_scope,
+    str prev_sig,
+    str chunk_data,
+) -> str:
+    auto sts = chunk_string_to_sign(amz_date, cred_scope, prev_sig, chunk_data)
+    return crypto.hmac_sha256(key, sts)
+
+# One aws-chunked wire frame for a chunk: "<hex-len>;chunk-signature=<sig>\r\n"
+# then the chunk data then "\r\n". The terminating chunk is `encode_chunk("",
+# <its signature>)`, which yields "0;chunk-signature=<sig>\r\n\r\n".
+def encode_chunk(str data, str signature) -> str:
+    return hex_lower(len(data)) + ";chunk-signature=" + signature + "\r\n" + data + "\r\n"
+
+# The full aws-chunked body plus the final (terminating-chunk) signature. Each
+# data chunk is signed in turn, chaining `prev` from `seed_sig`; then a
+# zero-length chunk is signed and appended to close the stream. `key`/`cred_scope`
+# come from the same SigV4 derivation as the seed signature.
+struct ChunkedBody:
+    str body
+    str final_sig
+
+def aws_chunked_body(
+    bytes key,
+    str amz_date,
+    str cred_scope,
+    str seed_sig,
+    list[str] chunks,
+) -> ChunkedBody:
+    auto prev = seed_sig
+    auto out = ""
+    for data in chunks:
+        auto sig = chunk_signature(key, amz_date, cred_scope, prev, data)
+        out = out + encode_chunk(data, sig)
+        prev = sig
+    auto fsig = chunk_signature(key, amz_date, cred_scope, prev, "")
+    out = out + encode_chunk("", fsig)
+    return ChunkedBody(body=out, final_sig=fsig)
+
+# The request's SigV4 signature alone (the seed of the chunk chain), computed the
+# same way as `sign_request` but returning just the hex signature. The payload
+# hash is the caller's x-amz-content-sha256 (for streaming, the sentinel) or
+# SHA-256 of the body. Factored out so streaming callers and the test vectors can
+# obtain the seed without assembling a full HTTP request.
+def request_signature(
+    Credentials creds,
+    Request req,
+    str amz_date,
+    str date_stamp,
+) -> str:
+    auto to_sign = req.headers.copy()
+    if creds.has_session:
+        to_sign["x-amz-security-token"] = creds.session_token
+    auto payload_sha = crypto.sha256(req.body)
+    Optional[str] psha = to_sign.get("x-amz-content-sha256")
+    payload_sha = psha.unwrap_or(payload_sha)
+    auto canon_uri_str = canonical_uri(req.path, req.service)
+    auto canon_q = url.canonical_query(req.query)
+    auto canon = canonical_headers(to_sign)
+    auto shead = signed_headers(to_sign)
+    auto creq = canonical_request(
+        req.method,
+        canon_uri_str,
+        canon_q,
+        canon,
+        shead,
+        payload_sha,
+    )
+    auto cred_scope = credential_scope(date_stamp, req.region, req.service)
+    auto sts = string_to_sign(amz_date, cred_scope, creq)
+    auto key = signing_key(creds.secret_key, date_stamp, req.region, req.service)
+    return sign(key, sts)
+
+# Sign `req` as an aws-chunked streaming upload and return ready-to-send HTTP/1.1
+# request text whose body is the signed chunk stream. The streaming markers are
+# injected into the signed header set: content-encoding: aws-chunked,
+# x-amz-content-sha256: STREAMING-AWS4-HMAC-SHA256-PAYLOAD, and
+# x-amz-decoded-content-length (the raw payload length). The seed signature signs
+# that header set; each chunk then signs over the previous signature. The on-wire
+# content-length is the encoded (framed) length and is not itself signed, matching
+# `sign_request`. `req.body` is ignored — the payload comes from `sbody`.
+def sign_streaming_request(
+    Credentials creds,
+    Request req,
+    StreamingBody sbody,
+    str amz_date,
+    str date_stamp,
+) -> str:
+    auto to_sign = req.headers.copy()
+    if creds.has_session:
+        to_sign["x-amz-security-token"] = creds.session_token
+    to_sign["content-encoding"] = "aws-chunked"
+    to_sign["x-amz-content-sha256"] = streaming_content_sha()
+    to_sign["x-amz-decoded-content-length"] = decoded_content_length(sbody.chunks)
+
+    auto canon_uri_str = canonical_uri(req.path, req.service)
+    auto canon_q = url.canonical_query(req.query)
+    auto canon = canonical_headers(to_sign)
+    auto shead = signed_headers(to_sign)
+    auto creq = canonical_request(
+        req.method,
+        canon_uri_str,
+        canon_q,
+        canon,
+        shead,
+        streaming_content_sha(),
+    )
+    auto cred_scope = credential_scope(date_stamp, req.region, req.service)
+    auto sts = string_to_sign(amz_date, cred_scope, creq)
+    auto key = signing_key(creds.secret_key, date_stamp, req.region, req.service)
+    auto seed_sig = sign(key, sts)
+    auto auth = authorization_header(creds.access_key, cred_scope, shead, seed_sig)
+
+    auto chunked = aws_chunked_body(key, amz_date, cred_scope, seed_sig, sbody.chunks)
+    auto headers_block = wire_headers(to_sign) + "content-length: " + str(len(chunked.body)) + "\r\n" + "authorization: " + auth + "\r\n"
+    auto target = wire_path(req.path)
+    if len(canon_q) > 0:
+        target = target + "?" + canon_q
+    return http_request_text(req.method, target, headers_block, chunked.body)
+
+# ---------------------------------------------------------------------------
+# Streaming response bodies (Transfer-Encoding: chunked)
+# ---------------------------------------------------------------------------
+
+# A response whose body is exposed as its ordered data chunks rather than one
+# buffered string — the receive side of streaming (large S3 GetObject responses
+# arrive chunked). The full body is the concatenation of `chunks`.
+struct StreamingResponse:
+    int64 status
+    dict[str, str] headers
+    list[str] chunks
+
+# The value of a hexadecimal string (lowercase or uppercase), stopping at the
+# first non-hex character — enough to read an HTTP chunk-size line, whose size
+# may be followed by a ";ext" chunk extension.
+def parse_hex(str s) -> int64:
+    auto digits = "0123456789abcdef"
+    auto v = 0
+    for i in range(0, len(s)):
+        auto d = digits.find(s[i:i + 1].lower())
+        if d < 0:
+            return v
+        v = v * 16 + d
+    return v
+
+# Decode an HTTP/1.1 Transfer-Encoding: chunked body into its ordered data
+# chunks. Each wire chunk is "<hex-len>[;ext]\r\n<data>\r\n"; a zero-length chunk
+# terminates the body. Returns the decoded chunk payloads (their concatenation is
+# the full entity body). Best-effort: a malformed frame stops decoding. This is
+# the inverse of the aws-chunked framing on the send side and fills the
+# chunked-decode gap `parse_response` left open.
+def decode_chunked(str raw_body) -> list[str]:
+    list[str] out = []
+    auto rest = raw_body
+    auto going = True
+    while going:
+        auto nl = rest.find("\r\n")
+        if nl < 0:
+            going = False
+        else:
+            auto size_line = rest[0:nl]
+            auto semi = size_line.find(";")
+            auto hexlen = size_line
+            if semi >= 0:
+                hexlen = size_line[0:semi]
+            auto clen = parse_hex(hexlen.strip())
+            if clen <= 0:
+                going = False
+            else:
+                auto data_start = nl + 2
+                out.append(rest[data_start:data_start + clen])
+                rest = rest[data_start + clen + 2:len(rest)]
+    return out
