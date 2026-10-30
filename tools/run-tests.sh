@@ -64,6 +64,7 @@ run_case restjson_binding
 run_case restxml_codec
 run_case query_codec
 run_case typed_errors
+run_case cbor_codec
 
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2
