@@ -160,3 +160,65 @@ no longer needs an in-repo hand-written reference.
   front-end (module resolution, cycle check, type-check) and `zap fmt` are
   host-safe and can be validated without LLVM/Docker (`zap ir`, `zap fmt`); only
   codegen/execution needs the toolchain image.
+
+## D-0002 — streaming bodies + aws-chunked SigV4 are additive aws-core surface (2026-10-30)
+
+**Status:** accepted (ticket #358, AWS Phase 4).
+
+**Governing decisions.** D-0011 §5 (the hand-written SigV4 signer is aws-core's
+job); aws-codegen D-0001 (generated-is-product; aws-core is runtime + oracle).
+
+**Context.** S3 large objects and multipart uploads need the payload sent as a
+stream of length-prefixed, individually-signed chunks
+(`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`, content-encoding `aws-chunked`) rather
+than one buffered, up-front-hashed body. Per-chunk signatures form a rolling
+chain seeded by the request's own SigV4 signature, so the stream cannot be
+reordered or truncated undetected.
+
+**Decision.** The capability is added to `aws_core.core` as a **purely additive**
+layer — the non-streaming `Request`/`sign_request` path and its pinned byte-diff
+fixtures are untouched. New public surface:
+
+- `struct StreamingBody { list[str] chunks }` + `streaming_body(chunks)` — a
+  request payload carried as ordered chunks (the terminating zero-length chunk is
+  appended by the encoder, not stored here).
+- `streaming_content_sha() -> str` — the `STREAMING-AWS4-HMAC-SHA256-PAYLOAD`
+  x-amz-content-sha256 sentinel.
+- `decoded_content_length(chunks) -> str` — the `x-amz-decoded-content-length`
+  value (decimal sum of chunk lengths).
+- `hex_lower(int64) -> str` — lowercase hex for the per-chunk length prefix.
+- `chunk_string_to_sign(amz_date, cred_scope, prev_sig, chunk_data) -> str` and
+  `chunk_signature(key, amz_date, cred_scope, prev_sig, chunk_data) -> str` — the
+  `AWS4-HMAC-SHA256-PAYLOAD` per-chunk string-to-sign and its HMAC signature.
+- `encode_chunk(data, signature) -> str` — one aws-chunked wire frame
+  (`<hex-len>;chunk-signature=<sig>\r\n<data>\r\n`).
+- `struct ChunkedBody { str body; str final_sig }` +
+  `aws_chunked_body(key, amz_date, cred_scope, seed_sig, chunks) -> ChunkedBody`
+  — the full framed body with the rolling chain and terminating chunk.
+- `request_signature(creds, req, amz_date, date_stamp) -> str` — the request's
+  SigV4 signature alone (the chunk-chain seed); same derivation as
+  `sign_request`, factored out so streaming callers and tests get the seed
+  without assembling a full HTTP request.
+- `sign_streaming_request(creds, req, sbody, amz_date, date_stamp) -> str` — the
+  one-call path: injects the aws-chunked markers into the signed header set,
+  computes the seed + chunk chain, and returns ready-to-send HTTP/1.1 text whose
+  body is the signed chunk stream. `req.body` is ignored (payload is `sbody`).
+  Content-length (the encoded length) is sent unsigned, matching `sign_request`.
+- Receive side: `struct StreamingResponse { int64 status; dict[str,str] headers;
+  list[str] chunks }`, `parse_hex(str) -> int64`, and `decode_chunked(raw_body)
+  -> list[str]` — decode a `Transfer-Encoding: chunked` response body into its
+  data chunks, filling the chunked-decode gap `parse_response` left open.
+
+**Verification.** Correctness of the rolling signature is proven host-side,
+without the Zap toolchain/Docker, against **AWS's own published known-answer
+vector** (S3 docs, "Transferring Payload in Multiple Chunks"): a 66560-byte PUT
+split 65536 + 1024 + terminating-0. `tools/verify_vectors.py` re-derives the seed
+and every per-chunk signature from scratch and asserts them equal to AWS's
+documented values (seed `4f232c43…a0a9`, chunk1 `ad80c730…8648`, chunk2
+`0055627c…5497`, final `b6c6ea8a…49df9`); the framed body length comes out to
+66824, matching AWS's documented `Content-Length`. The pinned fixture
+`tests/expected/streaming_sigv4.expected` and the Zap entry
+`tests/streaming_sigv4.main.zap` (run by `tools/run-tests.sh` under the toolchain
+in CI) reproduce the same bytes. Docker was not run (it kernel-panics the dev
+host); CI is the authoritative toolchain gate, with the Python oracle as the
+toolchain-free second implementation.
