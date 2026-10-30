@@ -222,3 +222,64 @@ documented values (seed `4f232c43…a0a9`, chunk1 `ad80c730…8648`, chunk2
 in CI) reproduce the same bytes. Docker was not run (it kernel-panics the dev
 host); CI is the authoritative toolchain gate, with the Python oracle as the
 toolchain-free second implementation.
+
+## D-0003 — presigned URLs (query-parameter SigV4) are additive aws-core surface (2026-10-30)
+
+**Status:** accepted (ticket #359, AWS Phase 4).
+
+**Governing decisions.** D-0011 §5 (the hand-written SigV4 signer is aws-core's
+job); aws-codegen D-0001 (generated-is-product; aws-core is runtime + oracle);
+builds on D-0002 (the streaming/aws-chunked signing primitives).
+
+**Context.** A presigned URL encodes the SigV4 signature in the query string
+instead of the `Authorization` header, so the URL alone grants time-boxed access
+(the canonical S3 GET/PUT link a browser or curl can use directly until
+`X-Amz-Expires` elapses). It reuses the exact same canonicalization machinery as
+header signing (canonical URI/query/headers, signing-key derivation,
+string-to-sign) with four differences: the auth-carrying params live in the
+canonical query string rather than a header; the signed-header set is usually
+just `host`; the payload hash is the literal `UNSIGNED-PAYLOAD` (the body is not
+known when the link is minted); and the computed `X-Amz-Signature` is appended as
+the final query param and is NOT part of the canonical request.
+
+**Decision.** The capability is added to `aws_core.core` as a **purely additive**
+layer — the header-signing `sign_request` path, the streaming path, and all their
+pinned byte-diff fixtures are untouched. New public surface:
+
+- `presign_algorithm() -> str` — the `AWS4-HMAC-SHA256` algorithm label (shared
+  with header signing).
+- `struct PresignedUrl { str url; str query; str signature }` — a minted link:
+  the full https URL (all query params incl. the trailing `X-Amz-Signature`), the
+  canonical query string with the signature appended, and the hex signature
+  alone.
+- `presign_params(creds, cred_scope, amz_date, expires, signed_hdrs, extra) ->
+  dict[str,str]` — the SigV4 presigning query params merged over any caller
+  `extra`: `X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`, `X-Amz-Expires`,
+  `X-Amz-SignedHeaders`, and (temporary creds only) `X-Amz-Security-Token`.
+- `presign_url(creds, req, expires, amz_date, date_stamp, payload_sha =
+  "UNSIGNED-PAYLOAD") -> PresignedUrl` — the one-call entry point: `req.headers`
+  is the signed-header set (usually `{"host": ...}`), `req.query` any extra params
+  to carry on the link; `expires` is in seconds. Reuses `credential_scope` /
+  `signed_headers` / `canonical_uri` / `canonical_headers` / `canonical_request` /
+  `string_to_sign` / `signing_key` / `sign` and `url.canonical_query` unchanged.
+- `presign_signature(creds, req, expires, amz_date, date_stamp, payload_sha =
+  "UNSIGNED-PAYLOAD") -> str` — the `X-Amz-Signature` alone (mirrors
+  `request_signature` for the header path), for known-answer assertions.
+- `presign_url_now(creds, req, expires, payload_sha = "UNSIGNED-PAYLOAD") ->
+  PresignedUrl` — the live path, using `signing_time_now()`.
+
+**Verification.** Correctness is proven host-side, without the Zap
+toolchain/Docker, against **AWS's own published presigned-URL known-answer
+vector** (S3 docs, "Authenticating Requests: Using Query Parameters"): a
+presigned GET of `/test.txt` on `examplebucket.s3.amazonaws.com` at
+2013-05-24T00:00:00Z, us-east-1, service `s3`, `X-Amz-Expires=86400`, signing only
+`host` with `UNSIGNED-PAYLOAD`. `tools/verify_vectors.py` re-derives the
+signature from scratch and asserts it equals AWS's documented
+`aeeed9bb…604d404`. A second self-consistent case exercises the temporary-
+credential path (`X-Amz-Security-Token`) plus an extra `response-content-type`
+param, covering the param merge / percent-encoding / sort order. The pinned
+fixture `tests/expected/presign_url.expected` and the Zap entry
+`tests/presign_url.main.zap` (run by `tools/run-tests.sh` under the toolchain in
+CI) reproduce the same bytes. Docker was not run (it kernel-panics the dev host);
+CI is the authoritative toolchain gate, with the Python oracle as the
+toolchain-free second implementation.

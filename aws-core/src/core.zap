@@ -802,3 +802,122 @@ def decode_chunked(str raw_body) -> list[str]:
                 out.append(rest[data_start:data_start + clen])
                 rest = rest[data_start + clen + 2:len(rest)]
     return out
+
+# ---------------------------------------------------------------------------
+# Presigned URLs — query-parameter SigV4 (#359)
+# ---------------------------------------------------------------------------
+#
+# A presigned URL carries the SigV4 signature in the query string instead of the
+# Authorization header, so the URL alone grants time-boxed access (an S3 GET/PUT
+# link a browser or curl can use directly until X-Amz-Expires elapses). Same
+# canonicalization machinery as header signing (canonical URI / query / headers,
+# signing key, string-to-sign), with four differences:
+#   * the auth-carrying params — X-Amz-Algorithm, X-Amz-Credential, X-Amz-Date,
+#     X-Amz-Expires, X-Amz-SignedHeaders (+ X-Amz-Security-Token for temporary
+#     credentials) — are merged into the canonical query string rather than an
+#     Authorization header;
+#   * the signed-header set is usually just `host` (whatever is in req.headers);
+#   * the payload hash is the literal UNSIGNED-PAYLOAD for S3 (the body is not
+#     known when the link is minted) — overridable via `payload_sha`;
+#   * the computed X-Amz-Signature is appended to the query string as the final
+#     parameter and is NOT itself part of the canonical request.
+#
+# Purely additive: the header-signing `sign_request` path, the streaming path,
+# and their pinned byte-diff fixtures are untouched. Proven host-side against
+# AWS's published presigned-URL known-answer vector (S3 docs, "Authenticating
+# Requests: Using Query Parameters") in tests/presign_url.main.zap, re-derived
+# independently by tools/verify_vectors.py.
+
+# The X-Amz-Algorithm value shared by header signing and presigning.
+def presign_algorithm() -> str:
+    return "AWS4-HMAC-SHA256"
+
+# A minted presigned URL: the full https URL (all query params, including the
+# trailing X-Amz-Signature), the canonical query string with the signature
+# appended, and the hex X-Amz-Signature on its own.
+struct PresignedUrl:
+    str url
+    str query
+    str signature
+
+# The SigV4 presigning query parameters: the auth-carrying params that become
+# part of the canonical query string. `extra` is merged first (e.g. an S3
+# `response-content-disposition` the caller wants on the link); `signed_hdrs` is
+# the ";"-joined signed-header name list (typically "host"). X-Amz-Security-Token
+# is added only for temporary (session) credentials.
+def presign_params(
+    Credentials creds,
+    str cred_scope,
+    str amz_date,
+    int64 expires,
+    str signed_hdrs,
+    dict[str, str] extra,
+) -> dict[str, str]:
+    auto p = extra.copy()
+    p["X-Amz-Algorithm"] = presign_algorithm()
+    p["X-Amz-Credential"] = creds.access_key + "/" + cred_scope
+    p["X-Amz-Date"] = amz_date
+    p["X-Amz-Expires"] = str(expires)
+    p["X-Amz-SignedHeaders"] = signed_hdrs
+    if creds.has_session:
+        p["X-Amz-Security-Token"] = creds.session_token
+    return p
+
+# Mint a presigned URL for `req`, valid for `expires` seconds from `amz_date`.
+# `req.headers` is the set of headers to sign (usually just {"host": ...});
+# `req.query` holds any extra query params to carry on the link. The payload hash
+# defaults to UNSIGNED-PAYLOAD (the S3 presign convention); pass `payload_sha` to
+# override it (e.g. the hash of a fixed body for a non-S3 query-presigned GET).
+def presign_url(
+    Credentials creds,
+    Request req,
+    int64 expires,
+    str amz_date,
+    str date_stamp,
+    str payload_sha = "UNSIGNED-PAYLOAD",
+) -> PresignedUrl:
+    auto cred_scope = credential_scope(date_stamp, req.region, req.service)
+    auto shead = signed_headers(req.headers)
+    auto params = presign_params(creds, cred_scope, amz_date, expires, shead, req.query)
+    auto canon_q = url.canonical_query(params)
+    auto canon_uri_str = canonical_uri(req.path, req.service)
+    auto canon = canonical_headers(req.headers)
+    auto creq = canonical_request(
+        req.method,
+        canon_uri_str,
+        canon_q,
+        canon,
+        shead,
+        payload_sha,
+    )
+    auto sts = string_to_sign(amz_date, cred_scope, creq)
+    auto key = signing_key(creds.secret_key, date_stamp, req.region, req.service)
+    auto signature = sign(key, sts)
+    auto full_q = canon_q + "&X-Amz-Signature=" + signature
+    auto url_str = "https://" + req.host + wire_path(req.path) + "?" + full_q
+    return PresignedUrl(url=url_str, query=full_q, signature=signature)
+
+# The X-Amz-Signature alone for a presigned `req` (mirrors `request_signature`
+# for the header path) — the hex signature without assembling the URL. Handy for
+# test vectors that assert the signature against a known-answer value.
+def presign_signature(
+    Credentials creds,
+    Request req,
+    int64 expires,
+    str amz_date,
+    str date_stamp,
+    str payload_sha = "UNSIGNED-PAYLOAD",
+) -> str:
+    auto signed = presign_url(creds, req, expires, amz_date, date_stamp, payload_sha)
+    return signed.signature
+
+# Mint a presigned URL using the current UTC time (the usual live path).
+# Equivalent to `presign_url` with `signing_time_now()`.
+def presign_url_now(
+    Credentials creds,
+    Request req,
+    int64 expires,
+    str payload_sha = "UNSIGNED-PAYLOAD",
+) -> PresignedUrl:
+    auto t = signing_time_now()
+    return presign_url(creds, req, expires, t.amz_date, t.date_stamp, payload_sha)

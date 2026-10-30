@@ -315,6 +315,84 @@ def streaming_sigv4():
     return "\n".join(out) + "\n"
 
 
+# --- presigned URLs — query-parameter SigV4 (#359) -------------------------
+#
+# The presigned-URL signature, re-derived from scratch and checked against AWS's
+# OWN published known-answer vector (S3 docs, "Authenticating Requests: Using
+# Query Parameters"). That example uses its own credentials/date/region (the same
+# KAT key as the chunked example, access AKIAIOSFODNN7EXAMPLE), so it does not
+# reuse the module-level IAM constants above. Reproducing AWS's exact published
+# X-Amz-Signature proves aws.core's query-presigning algorithm independently of
+# the Zap toolchain.
+
+PRESIGN_SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+PRESIGN_REGION = "us-east-1"
+PRESIGN_SERVICE = "s3"
+PRESIGN_AMZ = "20130524T000000Z"
+PRESIGN_DS = "20130524"
+# The X-Amz-Signature AWS documents for the presigned GET (the KAT we must hit).
+AWS_PRESIGN_SIG = ("aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f"
+                   "604d404")
+
+
+def presign(access, token, host, method, path, expires, extra):
+    """Mint a presigned URL — mirrors aws.core.presign_url.
+
+    The auth params (X-Amz-Algorithm/Credential/Date/Expires/SignedHeaders, plus
+    X-Amz-Security-Token for temporary creds) are merged into the canonical query
+    string; the payload hash is the literal UNSIGNED-PAYLOAD; and the computed
+    X-Amz-Signature is appended as the final query param (not part of the
+    canonical request).
+    """
+    scope = f"{PRESIGN_DS}/{PRESIGN_REGION}/{PRESIGN_SERVICE}/aws4_request"
+    headers = {"host": host}
+    sh = signed_headers(headers)
+    params = dict(extra)
+    params["X-Amz-Algorithm"] = "AWS4-HMAC-SHA256"
+    params["X-Amz-Credential"] = f"{access}/{scope}"
+    params["X-Amz-Date"] = PRESIGN_AMZ
+    params["X-Amz-Expires"] = str(expires)
+    params["X-Amz-SignedHeaders"] = sh
+    if token:
+        params["X-Amz-Security-Token"] = token
+    cq = canonical_query(params)
+    cu = canonical_uri(path, PRESIGN_SERVICE)
+    ch = canonical_headers(headers)
+    creq = f"{method}\n{cu}\n{cq}\n{ch}\n{sh}\nUNSIGNED-PAYLOAD"
+    sts = f"AWS4-HMAC-SHA256\n{PRESIGN_AMZ}\n{scope}\n{sha(creq)}"
+    sig = hmac.new(signing_key(PRESIGN_SECRET, PRESIGN_DS, PRESIGN_REGION,
+                               PRESIGN_SERVICE),
+                   sts.encode(), hashlib.sha256).hexdigest()
+    full_q = cq + "&X-Amz-Signature=" + sig
+    url = f"https://{host}{uri_encode(path, True)}?{full_q}"
+    return sig, url
+
+
+def presign_url():
+    out = []
+    host = "examplebucket.s3.amazonaws.com"
+
+    # Case 1: AWS published KAT (static credentials).
+    sig, url = presign("AKIAIOSFODNN7EXAMPLE", "", host, "GET", "/test.txt",
+                       86400, {})
+    assert sig == AWS_PRESIGN_SIG, f"presign {sig} != {AWS_PRESIGN_SIG}"
+    out.append("### presign.s3.GetObject ###")
+    out.append(sig)
+    out.append(url)
+
+    # Case 2: temporary credentials (X-Amz-Security-Token) + an extra
+    # response-content-type param — exercises the merge/encode/sort. Self-
+    # consistent (not an AWS-published value).
+    sig, url = presign("ASIAIOSFODNN7EXAMPLE", "FwoGZXIvYXdzEXAMPLE/token+value==",
+                       host, "GET", "/test.txt", 900,
+                       {"response-content-type": "text/plain"})
+    out.append("### presign.s3.GetObject+token ###")
+    out.append(sig)
+    out.append(url)
+
+    return "\n".join(out) + "\n"
+
+
 def check(name, computed):
     path = os.path.join(EXP, name + ".expected")
     with open(path, "r", newline="") as fh:
@@ -332,6 +410,7 @@ def main():
     ok &= check("sigv4_vectors", sigv4_vectors())
     ok &= check("service_signing", service_signing())
     ok &= check("streaming_sigv4", streaming_sigv4())
+    ok &= check("presign_url", presign_url())
     if not ok:
         return 1
     print("vectors verified against independent oracle")
