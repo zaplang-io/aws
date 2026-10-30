@@ -67,6 +67,7 @@ run_case typed_errors
 run_case dynamic_call
 run_case cbor_codec
 run_case conditions
+run_case marshal
 
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2

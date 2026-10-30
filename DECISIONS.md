@@ -856,3 +856,80 @@ zapc` front-end ran `zap fmt --check` and `zap ir` (full type-check through the
 materialized zenv) clean on the module and the test; the boto3 oracle generator
 re-derived green and its Python mirror byte-matches boto3 on all 25 vectors. CI
 (`ghcr.io/zaplang-io/zap:latest`) is the authoritative compile+run gate.
+
+## D-0010 — DynamoDB native <-> AttributeValue marshalling: boto3-byte-matched (2026-10-30)
+
+**Status:** accepted (ticket #434, the second piece of ergonomics epic #432).
+
+**Governing decisions.** aws-codegen D-0001 (generated-is-product: the resource-
+layer conveniences boto3 hand-codes are not derivable from botocore models, so
+they are hand-written). Builds directly on D-0009 (#433, the condition builder),
+whose `AttrValue` left the value-marshalling seam this ticket fills.
+
+**Context.** boto3's `boto3.dynamodb.types.TypeSerializer` / `TypeDeserializer`
+turn native Python values into the DynamoDB `AttributeValue` wire shape and back,
+so callers pass/read native data instead of hand-building `{"S": ...}` maps. The
+maintainer uses these heavily. This is the Zap counterpart, the second hand-
+written ergonomics module after `conditions`.
+
+**Decision.** A new shipping module `aws_core.marshal`:
+
+- A `Value` sum type models a marshallable native value: `S N Bool Null B L M SS
+  NS BS` (the same shape as `cbor.CborValue`, recursive for `L`/`M`). Numbers
+  ride as decimal STRINGS under `N` (DynamoDB's wire form); blobs as raw `bytes`,
+  base64-encoded only at the wire.
+- Native constructors `s n_int n_str n_float boolean null b l m ss ns bs`.
+- `serialize(Value) -> str` emits the AttributeValue wire JSON (boto3's
+  `TypeSerializer`); `deserialize(str) -> Value` parses it back via `json.loads`
+  (boto3's `TypeDeserializer`) — the exact inverse.
+- `from_scalar(conditions.AttrValue) -> Value` bridges a #433 condition value, so
+  a condition's `ExpressionAttributeValues` flow through this marshaller.
+- N accessors `n_is_integral` / `n_as_int` give the "int when integral" read; the
+  stored form stays the exact decimal string (consistent with `dynamodb.zap`),
+  so no float rounding is forced on deserialize.
+
+**Oracle.** Output byte-matches `boto3.dynamodb.types`:
+`tools/gen_marshal_vectors.py` runs the real boto3 `TypeSerializer` /
+`TypeDeserializer` for 20 vectors, cross-checks a pure-Python mirror of the Zap
+algorithm against it, and writes `tests/expected/marshal.expected`;
+`tests/marshal.main.zap` prints the same `### / SER / RT` blocks through the Zap
+module (SER = serialize, RT = serialize∘deserialize, proving the inverse) and
+`tools/run-tests.sh` diffs them. Canonicalization facts pinned by the oracle:
+
+- **Blobs are base64 at the wire.** boto3's `TypeSerializer` leaves `B`/`BS` as
+  RAW bytes (an intermediate consumed by botocore's awsJson serializer, which
+  base64-encodes them on the wire). `marshal` emits the wire form directly, so
+  the oracle base64-encodes blobs to match.
+- **Sets (SS/NS/BS) are unordered.** boto3 iterates a Python `set`, whose order
+  is arbitrary and non-reproducible. Both sides SORT the rendered element tokens
+  (lexically; the vectors are ASCII, so Zap `sorted` and Python `sorted` agree),
+  giving stable pinned bytes.
+- **Map member order.** On SERIALIZE a map keeps caller/insertion order (boto3
+  iterates the dict in order; `Value.M` keeps parallel key/value list order). On
+  DESERIALIZE a map has no inherent order, so keys are canonicalized to sorted
+  order; the vectors use sorted keys, so serialize∘deserialize round-trips.
+- **No JSON string escaping** on this hand path (matches `dynamodb.zap` /
+  `conditions.zap`): values avoid characters that need escaping. A shared
+  escaping pass is a follow-up for all three hand paths.
+
+**Divergence — float.** boto3's `TypeSerializer` REJECTS raw `float`
+(`TypeError: Float types are not supported. Use Decimal types instead.`), because
+binary floats round. Zap has native `float`, and Zap programs will pass it, so
+`n_float(float64)` is accepted and formatted via the native `str(float)`. The
+BYTE-MATCHED numeric paths are `n_int` (exact) and `n_str` (an exact decimal
+string, the path `conditions.N` feeds); callers who need exact digits use
+`n_str`. No `n_float` output string is pinned in the oracle: boto3 produces no
+float vector to match, and the exact `str(float)` bytes are a runtime value the
+host front-end gate (`zap ir`, type-check only) cannot confirm — pinning an
+unverifiable golden would be a fake. `n_float` is covered by CI compilation, not
+by a pinned byte assertion.
+
+**Verification.** Host front-end only (Docker crashes the maintainer's host, so
+the local LLVM/Docker gate was skipped): a throwaway detached `origin/main`
+`cargo build -p zapc` front-end ran `zap fmt --check` clean on the module +
+test, and `zap ir tests/marshal.main.zap` (full type-check of the module and its
+`base64` / `conditions` / `json` imports through the materialized zenv) emitted
+ZIR with no diagnostics; the boto3 oracle generator re-derived green and its
+Python mirror byte-matches boto3 on all 20 vectors with the round-trip identity
+holding. CI (`ghcr.io/zaplang-io/zap:latest`) is the authoritative compile+run
+gate.

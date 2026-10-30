@@ -1,0 +1,71 @@
+### s_basic ###
+SER {"S":"alice"}
+RT {"S":"alice"}
+### s_empty ###
+SER {"S":""}
+RT {"S":""}
+### n_int ###
+SER {"N":"30"}
+RT {"N":"30"}
+### n_neg ###
+SER {"N":"-7"}
+RT {"N":"-7"}
+### n_zero ###
+SER {"N":"0"}
+RT {"N":"0"}
+### n_decimal ###
+SER {"N":"3.14"}
+RT {"N":"3.14"}
+### n_decimal_neg ###
+SER {"N":"-0.5"}
+RT {"N":"-0.5"}
+### bool_true ###
+SER {"BOOL":true}
+RT {"BOOL":true}
+### bool_false ###
+SER {"BOOL":false}
+RT {"BOOL":false}
+### null ###
+SER {"NULL":true}
+RT {"NULL":true}
+### bytes ###
+SER {"B":"AQID"}
+RT {"B":"AQID"}
+### list_mixed ###
+SER {"L":[{"S":"a"},{"N":"1"},{"BOOL":true},{"NULL":true}]}
+RT {"L":[{"S":"a"},{"N":"1"},{"BOOL":true},{"NULL":true}]}
+### list_empty ###
+SER {"L":[]}
+RT {"L":[]}
+### map_basic ###
+SER {"M":{"age":{"N":"30"},"name":{"S":"Alice"}}}
+RT {"M":{"age":{"N":"30"},"name":{"S":"Alice"}}}
+### map_empty ###
+SER {"M":{}}
+RT {"M":{}}
+### map_nested ###
+SER {"M":{"profile":{"M":{"city":{"S":"NYC"}}}}}
+RT {"M":{"profile":{"M":{"city":{"S":"NYC"}}}}}
+### ss ###
+SER {"SS":["a","b","c"]}
+RT {"SS":["a","b","c"]}
+### ns ###
+SER {"NS":["1","2","3"]}
+RT {"NS":["1","2","3"]}
+### bs ###
+SER {"BS":["AQ==","Ag=="]}
+RT {"BS":["AQ==","Ag=="]}
+### deeply_nested ###
+SER {"L":[{"M":{"k":{"SS":["x","y"]}}}]}
+RT {"L":[{"M":{"k":{"SS":["x","y"]}}}]}
+### num_accessors ###
+NINT 30 true 30
+NINT -7 true -7
+NINT 0 true 0
+NINT 3.14 false
+NINT -0.5 false
+### from_scalar ###
+FS S {"S":"alice"}
+FS N {"N":"30"}
+FS BOOL {"BOOL":true}
+FS NULL {"NULL":true}
