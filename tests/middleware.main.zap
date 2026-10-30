@@ -167,11 +167,7 @@ def main():
     auto chain = middleware.chain_of(
         [tracer(log, "A"), tracer(log, "B"), tracer(log, "C")],
     )
-    fn(str) -> core.Response ok = lambda raw: core.Response(
-        status=200,
-        headers={},
-        body="{}",
-    )
+    fn(str) -> core.Response ok = lambda raw: core.Response(status=200, headers={}, body="{}")
     auto d1 = middleware.dispatch_with(chain, c, base, amz(), ds(), ok)
     print(" ".join(log))
 
@@ -188,11 +184,7 @@ def main():
 
     # == on_error transform ==
     print("== on_error ==")
-    fn(str) -> core.Response fail = lambda raw: core.Response(
-        status=400,
-        headers={},
-        body="{\"__type\": \"NoSuchKey\", \"message\": \"nope\"}",
-    )
+    fn(str) -> core.Response fail = lambda raw: core.Response(status=400, headers={}, body="{\"__type\": \"NoSuchKey\", \"message\": \"nope\"}")
     auto ei = middleware.with_on_error(middleware.new_interceptor("err"), wrap_error)
     auto ec = middleware.chain_of([ei])
     auto d3 = middleware.dispatch_with(ec, c, base, amz(), ds(), fail)
