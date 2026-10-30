@@ -23,13 +23,16 @@
 # Thin shim over aws.endpoints (default options, always bucket-in-host); the
 # resolver carries partition/FIPS/dualstack/global and the path-vs-virtual
 # choice (see `resolve_s3`).
+import core
+import endpoints
+
 def s3_host(str bucket, str region) -> str:
-    return s3_virtual_host_for(bucket, region, default_s3_options())
+    return endpoints.s3_virtual_host_for(bucket, region, endpoints.default_s3_options())
 
 # Regional S3 endpoint host (path-style / service-level ops): s3.<region>...
 # Thin shim over aws.endpoints `s3_service_host`.
 def s3_regional_host(str region) -> str:
-    return s3_service_host(region, default_s3_options())
+    return endpoints.s3_service_host(region, endpoints.default_s3_options())
 
 # Canonical object-key path: "/" + key.
 def s3_key_path(str key) -> str:
@@ -39,13 +42,13 @@ def s3_key_path(str key) -> str:
 # prefix (empty for virtual-hosted, "/<bucket>" for path-style) followed by the
 # "/<key>" object path. For virtual-hosted buckets this is just "/<key>", so the
 # signed request is unchanged from the v1 virtual-hosted-only path.
-def s3_object_path(S3Endpoint ep, str bucket, str key) -> str:
-    return s3_path_prefix(ep, bucket) + s3_key_path(key)
+def s3_object_path(endpoints.S3Endpoint ep, str bucket, str key) -> str:
+    return endpoints.s3_path_prefix(ep, bucket) + s3_key_path(key)
 
 # The request path for a bucket-level operation (e.g. ListObjectsV2) under a
 # resolved S3 endpoint: "/<bucket>" for path-style, else "/".
-def s3_bucket_path(S3Endpoint ep, str bucket) -> str:
-    auto prefix = s3_path_prefix(ep, bucket)
+def s3_bucket_path(endpoints.S3Endpoint ep, str bucket) -> str:
+    auto prefix = endpoints.s3_path_prefix(ep, bucket)
     if len(prefix) == 0:
         return "/"
     return prefix
@@ -61,19 +64,19 @@ def s3_base_headers(str host, str payload_sha, str amz_date) -> dict[str, str]:
 
 # GetObject: GET /<key> on the bucket's virtual host (empty body).
 def get_object_request(
-    Credentials creds,
+    core.Credentials creds,
     str region,
     str bucket,
     str key,
     str amz_date,
     str date_stamp,
 ) -> str:
-    auto ep = resolve_s3(bucket, region, default_s3_options())
+    auto ep = endpoints.resolve_s3(bucket, region, endpoints.default_s3_options())
     auto host = ep.host
-    auto sha = payload_hash("")
+    auto sha = core.payload_hash("")
     auto headers = s3_base_headers(host, sha, amz_date)
     dict[str, str] query = {}
-    auto req = Request(
+    auto req = core.Request(
         method="GET",
         service="s3",
         region=region,
@@ -83,13 +86,13 @@ def get_object_request(
         headers=headers,
         body="",
     )
-    return sign_request(creds, req, amz_date, date_stamp)
+    return core.sign_request(creds, req, amz_date, date_stamp)
 
 # PutObject: PUT /<key> with `body`. `content_type` sets the Content-Type header
 # (signed); `metadata` entries become signed `x-amz-meta-<key>` headers (names
 # lowercased). Both are optional keyword arguments.
 def put_object_request(
-    Credentials creds,
+    core.Credentials creds,
     str region,
     str bucket,
     str key,
@@ -99,16 +102,16 @@ def put_object_request(
     str content_type = "application/octet-stream",
     dict[str, str] metadata = {},
 ) -> str:
-    auto ep = resolve_s3(bucket, region, default_s3_options())
+    auto ep = endpoints.resolve_s3(bucket, region, endpoints.default_s3_options())
     auto host = ep.host
-    auto sha = payload_hash(body)
+    auto sha = core.payload_hash(body)
     auto headers = s3_base_headers(host, sha, amz_date)
     headers["content-type"] = content_type
     for name in metadata.keys():
         Optional[str] v = metadata.get(name)
         headers["x-amz-meta-" + name.lower()] = v.unwrap_or("")
     dict[str, str] query = {}
-    auto req = Request(
+    auto req = core.Request(
         method="PUT",
         service="s3",
         region=region,
@@ -118,14 +121,14 @@ def put_object_request(
         headers=headers,
         body=body,
     )
-    return sign_request(creds, req, amz_date, date_stamp)
+    return core.sign_request(creds, req, amz_date, date_stamp)
 
 # ListObjectsV2: GET /?list-type=2 on the bucket's virtual host. `prefix`
 # restricts keys; `max_keys` caps the page size (0 = omit, server default). The
 # options go into the request's query dict as decoded values; the signer
 # percent-encodes them (so a "/" in `prefix` is sent as %2F, per SigV4).
 def list_objects_v2_request(
-    Credentials creds,
+    core.Credentials creds,
     str region,
     str bucket,
     str amz_date,
@@ -133,9 +136,9 @@ def list_objects_v2_request(
     str prefix = "",
     int64 max_keys = 0,
 ) -> str:
-    auto ep = resolve_s3(bucket, region, default_s3_options())
+    auto ep = endpoints.resolve_s3(bucket, region, endpoints.default_s3_options())
     auto host = ep.host
-    auto sha = payload_hash("")
+    auto sha = core.payload_hash("")
     dict[str, str] params = {}
     params["list-type"] = "2"
     if len(prefix) > 0:
@@ -143,7 +146,7 @@ def list_objects_v2_request(
     if max_keys > 0:
         params["max-keys"] = str(max_keys)
     auto headers = s3_base_headers(host, sha, amz_date)
-    auto req = Request(
+    auto req = core.Request(
         method="GET",
         service="s3",
         region=region,
@@ -153,4 +156,4 @@ def list_objects_v2_request(
         headers=headers,
         body="",
     )
-    return sign_request(creds, req, amz_date, date_stamp)
+    return core.sign_request(creds, req, amz_date, date_stamp)

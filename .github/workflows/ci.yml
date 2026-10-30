@@ -12,6 +12,12 @@ jobs:
   # `container:` because it ships no Node.js, which GitHub's `container:` jobs
   # need for actions/checkout; `docker run` sidesteps that and still runs the
   # real `zap`.
+  #
+  # aws-core now ships as a zenv package (zaplang-io/zap#283, D-0081); the test
+  # and example entries import it via real Zap module imports
+  # (`import aws_core.<module>`) rather than the retired tools/bundle.py
+  # concatenation. CI materializes the dependency with `zap zenv create` and
+  # activates it so `aws_core` resolves from the project zenv.
   zap-tests:
     runs-on: ubuntu-latest
     steps:
@@ -22,18 +28,20 @@ jobs:
             ghcr.io/zaplang-io/zap:latest bash -lc '
               set -euo pipefail
               echo "zap: $(zap --version)"
+              # Materialize the aws-core dependency and activate the zenv, so
+              # `import aws_core.<module>` resolves from $ZAP_ZENV/pkg.
+              zap zenv create --no-venv
+              source zenv/activate
               # Canonical formatting gate (dogfoods `zap fmt`, D-0037).
-              zap fmt --check src tests examples
+              zap fmt --check aws-core/src tests examples
               # Independent SigV4 oracle re-derives the pinned fixtures (no toolchain).
               python3 tools/verify_vectors.py
-              # Real compile + run: proves aws.core PRODUCES the signed bytes.
+              # Real compile + run: proves the aws-core codecs PRODUCE the signed
+              # bytes through real module imports (reuses the active zenv).
               bash tools/run-tests.sh
-              # Compile-smoke the service modules + examples (guards on missing env).
-              bash tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap \
-                src/aws/retry.zap src/aws/awsjson.zap src/aws/dynamodb.zap \
-                examples/dynamodb_get_item.main.zap
-              bash tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap \
-                src/aws/s3.zap examples/s3_list_objects.main.zap
-              bash tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap \
-                src/aws/s3.zap examples/s3_put_object.main.zap
+              # Compile-smoke the examples (they guard on missing AWS env and
+              # return early, so this exercises the import graph + codegen).
+              zap run examples/dynamodb_get_item.main.zap
+              zap run examples/s3_list_objects.main.zap
+              zap run examples/s3_put_object.main.zap
             '

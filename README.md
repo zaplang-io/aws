@@ -67,13 +67,20 @@ SigV4 implementation in `tools/verify_vectors.py`.
 ## Layout
 
 ```
-zap.toml                       package manifest (official-tier metadata)
-src/aws/core.zap               shared core: credentials seam, SigV4, transport, seams
-src/aws/endpoints.zap          partition/region/endpoint resolver (#342)
-src/aws/credentials.zap        boto3-style credential provider chain (env/INI/IMDS/container/process)
-src/aws/retry.zap              standard-mode retry: backoff + retry-quota token bucket (#343)
-src/aws/dynamodb.zap           DynamoDB client (get_item, put_item)
-src/aws/s3.zap                 S3 client (get_object, put_object, list_objects_v2)
+zap.toml                       root consumer manifest (dep aws_core = path aws-core)
+zap.lock                       committed lockfile (D-0052)
+aws-core/zap.toml              the aws_core PACKAGE manifest ([package] name = "aws_core")
+aws-core/src/aws_core.zap      package root module (bare `import aws_core`)
+aws-core/src/core.zap          shared core: credentials seam, SigV4, transport, seams
+aws-core/src/endpoints.zap     partition/region/endpoint resolver + Endpoint (#342)
+aws-core/src/credentials.zap   boto3-style credential provider chain (env/INI/IMDS/container/process)
+aws-core/src/retry.zap         standard-mode retry: backoff + retry-quota token bucket (#343)
+aws-core/src/binding.zap       protocol-agnostic HTTP binding layer
+aws-core/src/awsjson.zap       awsJson 1.0/1.1 codec
+aws-core/src/restjson.zap      rest-json codec
+aws-core/src/restxml.zap       rest-xml codec
+aws-core/src/dynamodb.zap      PARKED hand-written DynamoDB oracle (byte-diff fixture)
+aws-core/src/s3.zap            PARKED hand-written S3 oracle (byte-diff fixture)
 tests/sigv4_vectors.main.zap   offline SigV4 conformance vs AWS's published vectors
 tests/service_signing.main.zap offline: full signed DynamoDB/S3 requests, pinned
 tests/endpoints_resolution.main.zap offline: endpoint resolution matrix, pinned
@@ -81,20 +88,18 @@ tests/retry.main.zap           offline: retry classification + backoff, pinned
 tests/credentials_chain.main.zap offline: provider chain ordering + INI/JSON/process parsers
 tests/expected/*.expected      pinned expected output
 examples/*.main.zap            runnable live-AWS examples (get-item, list, put-object)
-tools/bundle.py                stitch modules + a main() into one compilable file
-tools/zrun.sh                  bundle + run with the Zap toolchain
-tools/run-tests.sh             run the offline suite, diff vs expected
+tools/run-tests.sh             materialize the zenv, run the offline suite, diff vs expected
 tools/verify_vectors.py        independent SigV4 oracle (toolchain-free CI cross-check)
 ```
 
-The core and per-service modules are kept cleanly separated so the codegen
-generator can slot in later (D-0011 §2). They are still **bundled** rather than
-`import`ed: Zap-to-Zap module imports have since landed (zaplang-io/zap#283), but
-local-module resolution is rooted at the entry file's own directory, so adopting
-`import` cleanly means relocating every runnable entry (tests, examples) beside
-the library or shipping the core as a materialized package. That re-layout is a
-follow-up (see [FRICTION.md](FRICTION.md) #1); it is deliberately out of scope
-for this ergonomic rewrite of the clients.
+aws-core ships as a **zenv package** named `aws_core` (D-0011 §8, D-0052),
+consumed through real Zap module imports (zaplang-io/zap#283) — the
+`tools/bundle.py` concatenation workaround is retired (#339). Each test/example
+is a real program that does `import aws_core.<module>` (e.g.
+`import aws_core.core`, `import aws_core.binding`), and the repo root is the
+first consumer of that package. See [DECISIONS.md](DECISIONS.md) (D-0001) for the
+package layout, the module graph, and the import contract the generated
+per-service clients (aws-codegen) build on.
 
 ## Building the toolchain
 
@@ -104,10 +109,18 @@ The SDK is compiled and run by the `zap` toolchain from the sibling
 - **With a local LLVM 18:** build `zap` from the `zap` checkout
   (`cargo build -p zapc --features llvm --bin zap`) and point `ZAP` at the
   resulting binary.
-- **Without local LLVM (e.g. macOS):** use the repo's LLVM-18 dev container.
-  Build it once (`make docker-build` in the `zap` checkout), then set
-  `ZAP_REPO=/path/to/zap` and the scripts here run inside it. This is how v1 was
-  developed and tested; see `tools/zrun.sh`.
+- **Without local LLVM (e.g. macOS):** use the repo's LLVM-18 dev container (or
+  the prebuilt `ghcr.io/zaplang-io/zap:latest` image CI uses). The front-end
+  (module resolution, type-check) and `zap fmt` are host-safe and need no LLVM;
+  only `zap run` / `zap build` need the toolchain image.
+
+aws-core is imported, not bundled, so programs resolve it through the project
+zenv. Materialize it once per checkout and activate it:
+
+```bash
+zap zenv create --no-venv     # copies aws-core into zenv/pkg/aws_core
+source zenv/activate          # sets ZAP_ZENV so `import aws_core.*` resolves
+```
 
 ## Running the offline tests
 
@@ -117,10 +130,9 @@ No AWS account or network needed — deterministic SigV4 vectors.
 # toolchain-free: verify the pinned fixtures with the independent oracle
 python3 tools/verify_vectors.py
 
-# through the real toolchain (needs zap; or ZAP_REPO for the container):
-ZAP=/path/to/zap/target/debug/zap tools/run-tests.sh
-#   or, via the dev container:
-ZAP_REPO=/path/to/zap tools/run-tests.sh
+# through the real toolchain (needs zap on PATH, or $ZAP): materializes the zenv
+# itself, compiles+runs each entry, diffs stdout against tests/expected/*
+tools/run-tests.sh
 ```
 
 ## Running against real AWS
@@ -128,29 +140,25 @@ ZAP_REPO=/path/to/zap tools/run-tests.sh
 The examples make a real signed call. The SigV4 timestamp is now stamped by the
 SDK from the current UTC time (`sign_request_now` / `datetime`), so only the
 credentials and region are needed (the v1 `ZAP_AWS_AMZ_DATE` /
-`ZAP_AWS_DATE_STAMP` vars are gone — FRICTION.md #4 resolved):
+`ZAP_AWS_DATE_STAMP` vars are gone — FRICTION.md #4 resolved). Run each example
+as an ordinary program with the zenv active (see above):
 
 ```bash
 export AWS_ACCESS_KEY_ID=...        AWS_SECRET_ACCESS_KEY=...
 export AWS_SESSION_TOKEN=...        # only for temporary credentials
 export AWS_REGION=us-east-1
+source zenv/activate
 
 # DynamoDB GetItem (edit table/key in the example):
-ZAP_REPO=/path/to/zap tools/zrun.sh \
-    src/aws/core.zap src/aws/endpoints.zap src/aws/dynamodb.zap \
-    examples/dynamodb_get_item.main.zap
+zap run examples/dynamodb_get_item.main.zap
 
 # S3 ListObjectsV2:
 export ZAP_AWS_BUCKET=my-bucket
-ZAP_REPO=/path/to/zap tools/zrun.sh \
-    src/aws/core.zap src/aws/endpoints.zap src/aws/s3.zap \
-    examples/s3_list_objects.main.zap
+zap run examples/s3_list_objects.main.zap
 
 # S3 PutObject with a content type + metadata (boto3-style keyword args):
 export ZAP_AWS_BUCKET=my-bucket ZAP_AWS_KEY=hello.txt
-ZAP_REPO=/path/to/zap tools/zrun.sh \
-    src/aws/core.zap src/aws/endpoints.zap src/aws/s3.zap \
-    examples/s3_put_object.main.zap
+zap run examples/s3_put_object.main.zap
 ```
 
 SigV4 rejects a timestamp skewed more than ~5 minutes, so the host clock must be
@@ -180,8 +188,9 @@ dict-based items) — see FRICTION.md "Resolved in Phase 1". What remains:
   per-service error-shape registry and generated paginators are follow-ups.
 - Response parsing is status + headers + body; no chunked-transfer decode, and
   S3's rest-xml body is returned raw (no `xml` body parser yet, D-0011 §4).
-- Protocols: awsJson + S3 rest SigV4. The build still stitches modules with
-  `tools/bundle.py` (module imports not adopted — #339).
+- Protocols: awsJson + S3 rest SigV4. The modules are linked via real Zap module
+  imports (aws-core is a zenv package; #339 step 1, zaplang-io/zap#283); the
+  `tools/bundle.py` concatenation workaround has been retired.
 - JSON/metadata string values must not need escaping (no JSON string-escape pass
   yet).
 

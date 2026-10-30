@@ -24,8 +24,12 @@
 #     `Output.from_json(resp.body)` — the codec's intended request/response path.
 
 # The DynamoDB awsJson protocol: version 1.0, API id "DynamoDB_20120810".
-def ddb_protocol() -> AwsJson:
-    return awsjson_1_0("DynamoDB_20120810", "dynamodb")
+import awsjson
+import core
+import endpoints
+
+def ddb_protocol() -> awsjson.AwsJson:
+    return awsjson.awsjson_1_0("DynamoDB_20120810", "dynamodb")
 
 # --- AttributeValue JSON (built from dicts) --------------------------------
 
@@ -106,16 +110,16 @@ struct DescribeTableOutput:
 # (reads like boto3's `Key=...`). Returns ready-to-send HTTP/1.1 request text,
 # built + signed through the aws.awsjson codec.
 def get_item_request(
-    Credentials creds,
+    core.Credentials creds,
     str region,
     str table,
     dict[str, str] key,
     str amz_date,
     str date_stamp,
 ) -> str:
-    auto host = regional_host("dynamodb", region)
+    auto host = endpoints.regional_host("dynamodb", region)
     auto body = get_item_body(table, key)
-    return awsjson_request(
+    return awsjson.awsjson_request(
         ddb_protocol(),
         creds,
         region,
@@ -131,7 +135,7 @@ def get_item_request(
 # (e.g. {"age": "30"}). Returns ready-to-send HTTP/1.1 request text, built +
 # signed through the aws.awsjson codec.
 def put_item_request(
-    Credentials creds,
+    core.Credentials creds,
     str region,
     str table,
     dict[str, str] item,
@@ -139,9 +143,9 @@ def put_item_request(
     str date_stamp,
     dict[str, str] numbers = {},
 ) -> str:
-    auto host = regional_host("dynamodb", region)
+    auto host = endpoints.regional_host("dynamodb", region)
     auto body = put_item_body(table, item, numbers)
-    return awsjson_request(
+    return awsjson.awsjson_request(
         ddb_protocol(),
         creds,
         region,
@@ -157,15 +161,15 @@ def put_item_request(
 # ready-to-send HTTP/1.1 request text; parse a reply with
 # `DescribeTableOutput.from_json(response.body)`.
 def describe_table_request(
-    Credentials creds,
+    core.Credentials creds,
     str region,
     str table,
     str amz_date,
     str date_stamp,
 ) -> str:
-    auto host = regional_host("dynamodb", region)
+    auto host = endpoints.regional_host("dynamodb", region)
     auto body = DescribeTableInput(TableName=table).to_json()
-    return awsjson_request(
+    return awsjson.awsjson_request(
         ddb_protocol(),
         creds,
         region,

@@ -1,23 +1,21 @@
-# Zap project manifest (zap.toml). TOML, Cargo-style (D-0052).
+# The zaplang-io/aws repo manifest. This root project is the aws-core ORACLE
+# HARNESS: it depends on the local `aws-core` package and drives its offline
+# conformance suite (tests/) and the live examples (examples/) as real Zap
+# programs that `import aws_core.<module>` — the same way the generated
+# per-service clients (aws-codegen) consume it. It is the first consumer of the
+# aws-core package, so the suite dogfoods the import contract.
 #
-# The official Zap AWS SDK (D-0011). Distributed in the official-packages tier
-# (D-0056): developed under zaplang-io, installed/managed by the Zap package
-# manager (I#69) — NOT a bundled stdlib module.
+# The shipping SDK is the GENERATED clients (aws-codegen, D-0001); the hand-
+# written aws-core package in this repo is the runtime those clients ride on and
+# the byte-diff oracle they are diffed against. See DECISIONS.md.
 #
-# This is the v1 HAND-WRITTEN THIN VERTICAL: a shared SigV4/credentials/transport
-# core plus hand-written S3 and DynamoDB clients, to make Zap runnable against
-# real AWS and to surface language/stdlib gaps (see FRICTION.md). The full SDK is
-# build-time codegen from botocore models (D-0011 §1) — a later phase.
-#
-# Per D-0011 §8 the shipped shape is one `aws-core` package + per-service
-# packages (`aws-s3`, `aws-dynamodb`, ...). That split needs Zap-to-Zap package
-# imports, which the compiler does not consume yet (FRICTION.md #1); until then
-# the modules live together under src/aws/ and are stitched by tools/bundle.py.
+# Build: the aws-core modules are linked via real Zap module imports
+# (zaplang-io/zap#283), not the retired tools/bundle.py concatenation. CI
+# materializes the dependency with `zap zenv create` and runs each entry with the
+# zenv active (`source zenv/activate`).
 [package]
 name = "aws"
 version = "0.1.0"
 
 [dependencies]
-# None yet. The SDK uses only stdlib modules (crypto, os, tls, net, json,
-# datetime). When per-service packages split out, `aws-s3` / `aws-dynamodb` will
-# depend on `aws-core` here.
+aws_core = { path = "aws-core" }

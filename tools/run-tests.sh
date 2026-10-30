@@ -1,22 +1,40 @@
 #!/usr/bin/env bash
-# Run the offline test suite: bundle each test with the modules it needs, run it
-# through the Zap toolchain, and diff stdout against the pinned expected output.
-# Deterministic; makes no live AWS calls.
+# Run the offline conformance suite: compile+run each test entry through the Zap
+# toolchain and diff stdout against the pinned expected output. Deterministic;
+# makes no live AWS calls.
 #
-# Honors the same toolchain-selection env vars as tools/zrun.sh ($ZAP, or
-# $ZAP_REPO for the dev container). Exit non-zero on the first mismatch.
+# Each entry is a real Zap program that imports the aws-core package modules via
+# #283 module imports (`import aws_core.core`, …) — there is no bundling. The
+# dependency is materialized into the project zenv (`zap zenv create`) and this
+# script activates it so `zap run` resolves `aws_core` from `$ZAP_ZENV/pkg`.
+#
+# Toolchain: `zap` from PATH (the CI image), unless $ZAP overrides it. Running
+# the programs needs codegen (LLVM), so this is a container/CI step — the host
+# front-end gate (zap fmt / zap ir) is separate. Exit non-zero on first mismatch.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
 
+ZAP="${ZAP:-zap}"
+
+# Materialize the aws-core dependency into the project zenv and activate it, so
+# `import aws_core.<module>` resolves to $ZAP_ZENV/pkg/aws_core/src/<module>.zap.
+if [[ -z "${ZAP_ZENV:-}" ]]; then
+    rm -rf zenv
+    "$ZAP" zenv create --no-venv >/dev/null
+    # shellcheck disable=SC1091
+    source zenv/activate
+fi
+
 fail=0
 run_case() {
-    local name="$1"; shift
+    local name="$1"
+    local entry="tests/${name}.main.zap"
     local expected="tests/expected/${name}.expected"
     echo "== ${name} =="
     local got
-    got="$(bash tools/zrun.sh "$@" 2>/dev/null)"
+    got="$("$ZAP" run "$entry" 2>/dev/null)"
     if [[ ! -f "$expected" ]]; then
         echo "  MISSING expected: $expected" >&2
         fail=1
@@ -32,34 +50,15 @@ run_case() {
     fi
 }
 
-run_case sigv4_vectors \
-    src/aws/core.zap src/aws/endpoints.zap tests/sigv4_vectors.main.zap
-run_case service_signing \
-    src/aws/core.zap src/aws/endpoints.zap src/aws/awsjson.zap src/aws/dynamodb.zap \
-    src/aws/s3.zap tests/service_signing.main.zap
-run_case awsjson_codec \
-    src/aws/core.zap src/aws/endpoints.zap src/aws/awsjson.zap src/aws/dynamodb.zap \
-    tests/awsjson_codec.main.zap
-run_case retry \
-    src/aws/core.zap src/aws/endpoints.zap src/aws/retry.zap tests/retry.main.zap
-run_case endpoints_resolution \
-    src/aws/core.zap src/aws/endpoints.zap tests/endpoints_resolution.main.zap
-
-run_case credentials_chain \
-    src/aws/core.zap src/aws/endpoints.zap src/aws/credentials.zap \
-    tests/credentials_chain.main.zap
-
-run_case restjson_binding \
-    src/aws/core.zap src/aws/endpoints.zap src/aws/binding.zap src/aws/restjson.zap \
-    tests/restjson_binding.main.zap
-
-run_case restxml_codec \
-    src/aws/core.zap src/aws/endpoints.zap src/aws/binding.zap src/aws/restxml.zap \
-    tests/restxml_codec.main.zap
-
-run_case query_codec \
-    src/aws/core.zap src/aws/endpoints.zap src/aws/query.zap \
-    tests/query_codec.main.zap
+run_case sigv4_vectors
+run_case service_signing
+run_case awsjson_codec
+run_case retry
+run_case endpoints_resolution
+run_case credentials_chain
+run_case restjson_binding
+run_case restxml_codec
+run_case query_codec
 
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2
