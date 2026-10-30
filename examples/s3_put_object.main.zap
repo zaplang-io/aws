@@ -19,6 +19,10 @@
 # The body, content type and metadata below are the whole payload the SDK signs;
 # Content-Length and the x-amz-meta-* headers are derived for you.
 
+import aws_core.core
+import aws_core.s3
+import os
+
 def need(str name) -> bool:
     if os.hasenv(name):
         return True
@@ -37,13 +41,13 @@ def main():
     if not need("ZAP_AWS_KEY"):
         return
 
-    auto creds = credentials_from_env()
+    auto creds = core.credentials_from_env()
     auto region = os.getenv("AWS_REGION")
     auto bucket = os.getenv("ZAP_AWS_BUCKET")
     auto key = os.getenv("ZAP_AWS_KEY")
-    auto t = signing_time_now()
+    auto t = core.signing_time_now()
 
-    auto req = put_object_request(
+    auto req = s3.put_object_request(
         creds,
         region,
         bucket,
@@ -54,14 +58,14 @@ def main():
         content_type="text/plain",
         metadata={"owner": "zap", "source": "example"},
     )
-    auto host = s3_host(bucket, region)
+    auto host = s3.s3_host(bucket, region)
     print("--- request ---")
     print(req)
     print("--- response ---")
-    auto resp = send(host, req)
+    auto resp = core.send(host, req)
     print("status: " + str(resp.status))
     print(resp.body)
-    Optional[AwsError] err = parse_error(resp)
+    Optional[core.AwsError] err = core.parse_error(resp)
     if err.is_some():
         auto e = err.unwrap()
         print("error: " + e.code + " — " + e.message)

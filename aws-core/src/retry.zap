@@ -32,6 +32,7 @@
 # Callers that do NOT want retries keep using aws.core `send` / `send_https`
 # directly — nothing here is on that path unless you route through it.
 
+import core
 import random
 import math
 import time
@@ -166,7 +167,7 @@ def is_transient_status(int64 status) -> bool:
 # throttle, not a plain transient). A 2xx never reaches here in the loop, but is
 # classified `none` for completeness.
 def retry_class(int64 status, str code) -> int64:
-    if is_success(status):
+    if core.is_success(status):
         return class_none()
     if status == 429:
         return class_throttling()
@@ -268,14 +269,14 @@ def retry_token_cost(RetryConfig cfg, int64 status) -> int64:
 # was hit or the quota bucket ran dry (as opposed to surfacing a permanent
 # error or a success).
 struct RetryOutcome:
-    Response response
+    core.Response response
     int64 attempts
-    Optional[AwsError] error
+    Optional[core.AwsError] error
     bool quota_exhausted
 
 # Pull the AWS error code out of a response for classification ("" when none).
-def response_error_code(Response resp) -> str:
-    Optional[AwsError] errp = parse_error(resp)
+def response_error_code(core.Response resp) -> str:
+    Optional[core.AwsError] errp = core.parse_error(resp)
     if errp.is_some():
         return errp.unwrap().code
     return ""
@@ -294,18 +295,18 @@ def response_error_code(Response resp) -> str:
 def retry_send(
     RetryConfig cfg,
     RetryQuota quota,
-    fn() -> Response attempt_fn,
+    fn() -> core.Response attempt_fn,
 ) -> RetryOutcome:
     auto attempt = 1
     auto spent = 0
     auto resp = attempt_fn()
     while True:
-        if is_success(resp.status):
+        if core.is_success(resp.status):
             if spent > 0:
                 quota_release(quota, spent)
             else:
                 quota_release(quota, cfg.no_retry_refill)
-            Optional[AwsError] no_err = Optional.None
+            Optional[core.AwsError] no_err = Optional.None
             return RetryOutcome(
                 response=resp,
                 attempts=attempt,
@@ -313,7 +314,7 @@ def retry_send(
                 quota_exhausted=False,
             )
         auto code = response_error_code(resp)
-        Optional[AwsError] errp = parse_error(resp)
+        Optional[core.AwsError] errp = core.parse_error(resp)
         if not is_retryable(resp.status, code):
             return RetryOutcome(
                 response=resp,
@@ -352,8 +353,8 @@ def send_request_with_retry(
     RetryConfig cfg,
     RetryQuota quota,
     str host,
-    Credentials creds,
-    Request req,
+    core.Credentials creds,
+    core.Request req,
 ) -> RetryOutcome:
-    fn() -> Response attempt_fn = lambda: send(host, sign_request_now(creds, req))
+    fn() -> core.Response attempt_fn = lambda: core.send(host, core.sign_request_now(creds, req))
     return retry_send(cfg, quota, attempt_fn)

@@ -25,82 +25,88 @@
 # Run: tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap src/aws/query.zap \
 #          tests/query_codec.main.zap
 
+import aws_core.core
+import aws_core.query
+
 def main():
-    auto creds = credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY")
+    auto creds = core.credentials(
+        "AKIDEXAMPLE",
+        "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+    )
     auto region = "us-east-1"
     auto amz_date = "20150830T123600Z"
     auto date_stamp = "20150830"
 
     # --- 1. awsQuery serialize: scalars + nested + wrapped list + flat list + map
     print("### query serialize (scalar+nested+wrapped-list+flat-list+map) ###")
-    auto p = query_params("CreateThing", "2010-05-08")
-    p = query_scalar(p, "Name", "my thing")
-    p = query_scalar(p, "Count", "3")
-    p = query_scalar(p, query_key("Owner", "Id"), "o-1")
+    auto p = query.query_params("CreateThing", "2010-05-08")
+    p = query.query_scalar(p, "Name", "my thing")
+    p = query.query_scalar(p, "Count", "3")
+    p = query.query_scalar(p, query.query_key("Owner", "Id"), "o-1")
     list[str] tag_vals = ["red", "blue"]
-    p = query_list(p, "Tags", "member", tag_vals)
+    p = query.query_list(p, "Tags", "member", tag_vals)
     list[str] alias_vals = ["a1", "a2"]
-    p = query_flat_list(p, "Alias", alias_vals)
+    p = query.query_flat_list(p, "Alias", alias_vals)
     list[str] attr_keys = ["k1"]
     list[str] attr_vals = ["v1"]
-    p = query_map(p, "Attrs", "key", "value", attr_keys, attr_vals)
-    auto body = query_encode(p)
+    p = query.query_map(p, "Attrs", "key", "value", attr_keys, attr_vals)
+    auto body = query.query_encode(p)
     print(body)
 
     # --- 2. ec2Query serialize: Capitalized keys + always-flattened list -------
     print("### ec2 serialize (capitalized + flat list) ###")
-    auto e = query_params("RunThings", "2016-11-15")
-    e = query_scalar(e, "ImageId", "ami-1")
+    auto e = query.query_params("RunThings", "2016-11-15")
+    e = query.query_scalar(e, "ImageId", "ami-1")
     list[str] sg_vals = ["sg-1", "sg-2"]
-    e = query_flat_list(e, "SecurityGroup", sg_vals)
-    print(query_encode(e))
+    e = query.query_flat_list(e, "SecurityGroup", sg_vals)
+    print(query.query_encode(e))
 
     # --- 3. signed query request (IAM) carrying the form body ------------------
     print("### query CreateThing (IAM, signed) ###")
     auto host = "iam.amazonaws.com"
-    print(query_sign(creds, "iam", region, host, p, amz_date, date_stamp))
+    print(query.query_sign(creds, "iam", region, host, p, amz_date, date_stamp))
 
     # --- 4. awsQuery response parse: <…Result> + <ResponseMetadata> ------------
     print("### query response parse ###")
     auto q_body = "<CreateThingResponse><CreateThingResult><Id>t-1</Id><Tags><member>red</member><member>blue</member></Tags></CreateThingResult><ResponseMetadata><RequestId>req-123</RequestId></ResponseMetadata></CreateThingResponse>"
     auto q_raw = "HTTP/1.1 200 OK\r\n" + "content-type: text/xml\r\n" + "\r\n" + q_body
-    auto q_resp = parse_response(q_raw)
-    auto q_root = query_parse(q_resp)
-    auto q_result = query_result(q_root, "CreateThingResult").unwrap()
+    auto q_resp = core.parse_response(q_raw)
+    auto q_root = query.query_parse(q_resp)
+    auto q_result = query.query_result(q_root, "CreateThingResult").unwrap()
     print("Id=" + q_result.find("Id").unwrap().get_text())
     auto q_tags = q_result.find("Tags").unwrap().find_all("member")
     auto t0 = q_tags[0].get_text()
     auto t1 = q_tags[1].get_text()
     print("tags=" + str(len(q_tags)) + ":" + t0 + "," + t1)
-    print("requestId=" + query_request_id(q_root))
+    print("requestId=" + query.query_request_id(q_root))
 
     # --- 5. ec2Query response parse: no Result wrapper, lowercase requestId -----
     print("### ec2 response parse ###")
     auto c_body = "<RunThingsResponse><requestId>ec2-req-9</requestId><instanceId>i-1</instanceId></RunThingsResponse>"
     auto c_raw = "HTTP/1.1 200 OK\r\n" + "content-type: text/xml\r\n" + "\r\n" + c_body
-    auto c_resp = parse_response(c_raw)
-    auto c_root = query_parse(c_resp)
-    auto c_result = ec2_result(c_root)
+    auto c_resp = core.parse_response(c_raw)
+    auto c_root = query.query_parse(c_resp)
+    auto c_result = query.ec2_result(c_root)
     print("instanceId=" + c_result.find("instanceId").unwrap().get_text())
-    print("requestId=" + ec2_request_id(c_root))
+    print("requestId=" + query.ec2_request_id(c_root))
 
     # --- 6. error dispatch: awsQuery <ErrorResponse> and ec2 <Response><Errors> -
     print("### query error dispatch ###")
     auto q_err = "HTTP/1.1 400 Bad Request\r\n" + "content-type: text/xml\r\n" + "\r\n" + "<ErrorResponse><Error><Type>Sender</Type><Code>InvalidParameterValue</Code><Message>bad param</Message></Error><RequestId>err-req-1</RequestId></ErrorResponse>"
-    auto qe = query_error(parse_response(q_err))
-    auto qev = qe.unwrap_or(AwsError(code="<none>", message="<none>", status=0))
+    auto qe = query.query_error(core.parse_response(q_err))
+    auto qev = qe.unwrap_or(core.AwsError(code="<none>", message="<none>", status=0))
     print("code=" + qev.code)
     print("message=" + qev.message)
     print("status=" + str(qev.status))
 
     auto c_err = "HTTP/1.1 400 Bad Request\r\n" + "content-type: text/xml\r\n" + "\r\n" + "<Response><Errors><Error><Code>InvalidInstanceID.NotFound</Code><Message>no instance</Message></Error></Errors><RequestId>ec2-err-1</RequestId></Response>"
-    auto ce = ec2_error(parse_response(c_err))
-    auto cev = ce.unwrap_or(AwsError(code="<none>", message="<none>", status=0))
+    auto ce = query.ec2_error(core.parse_response(c_err))
+    auto cev = ce.unwrap_or(core.AwsError(code="<none>", message="<none>", status=0))
     print("code2=" + cev.code)
     print("message2=" + cev.message)
     print("status2=" + str(cev.status))
 
     # A 2xx response yields no error.
-    Optional[AwsError] none_err = query_error(q_resp)
+    Optional[core.AwsError] none_err = query.query_error(q_resp)
     if none_err.is_none():
         print("ok-no-error")

@@ -34,6 +34,7 @@
 # ordering and the parsers are all testable offline with fixtured inputs
 # (tests/credentials_chain.main.zap). No live AWS calls in the test path.
 
+import core
 import os
 import fs
 import process
@@ -91,8 +92,8 @@ def not_found(str provider) -> CredentialRecord:
 
 # Project a resolved record onto the aws.core.Credentials the signer consumes.
 # Delegates to aws.core.credentials so has_session stays derived the one way.
-def to_credentials(CredentialRecord rec) -> Credentials:
-    return credentials(rec.access_key, rec.secret_key, rec.session_token)
+def to_credentials(CredentialRecord rec) -> core.Credentials:
+    return core.credentials(rec.access_key, rec.secret_key, rec.session_token)
 
 # ---------------------------------------------------------------------------
 # Provider 1 — environment variables
@@ -318,12 +319,12 @@ def provider_shared_config() -> CredentialRecord:
 # enough for these flat, server-produced objects). Missing access/secret keys
 # make it not-found.
 def parse_json_credentials(str body, str token_field, str provider) -> CredentialRecord:
-    Optional[str] ak = json_string_field(body, "AccessKeyId")
-    Optional[str] sk = json_string_field(body, "SecretAccessKey")
+    Optional[str] ak = core.json_string_field(body, "AccessKeyId")
+    Optional[str] sk = core.json_string_field(body, "SecretAccessKey")
     if ak.is_none() or sk.is_none():
         return not_found(provider)
-    Optional[str] tok = json_string_field(body, token_field)
-    Optional[str] exp = json_string_field(body, "Expiration")
+    Optional[str] tok = core.json_string_field(body, token_field)
+    Optional[str] exp = core.json_string_field(body, "Expiration")
     return found(
         ak.unwrap(),
         sk.unwrap(),
@@ -508,7 +509,7 @@ def resolve_credential_record() -> CredentialRecord:
 # aws.core.Credentials for the signer. On total failure this yields empty-string
 # keys (same contract as aws.core.credentials_from_env on a missing env), so the
 # caller can detect it by an empty access_key without a thrown error.
-def default_credentials() -> Credentials:
+def default_credentials() -> core.Credentials:
     return to_credentials(resolve_credential_record())
 
 # ---------------------------------------------------------------------------

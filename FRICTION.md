@@ -122,11 +122,11 @@ stdlib. Everything it needs was expressible with no new language friction:
 - **f-string fields can't nest the field quote.** `f"{d.get(\"k\")}"` fails to
   lex; bind to a local first. (Already noted upstream in #285.)
 
-## 1. No Zap-to-Zap package / module imports  — now LANDED (#283), not yet adopted
+## 1. No Zap-to-Zap package / module imports  — RESOLVED + ADOPTED (#283 / #339)
 
-`import` resolves only stdlib modules and `import python`; project mode compiles
-exactly one entry file (`src/main.zap`). There is no way for one `.zap` file to
-use defs from another, so a multi-module package cannot be built or imported.
+*Historical.* `import` once resolved only stdlib modules and `import python`, and
+project mode compiled exactly one entry file, so a multi-module package could not
+be built or imported — the whole SDK had to be stitched into one file.
 
 ```
 # a.zap: def helper() -> int64: return 1
@@ -137,22 +137,25 @@ use defs from another, so a multi-module package cannot be built or imported.
 `aws-s3`/`aws-dynamodb` packages depending on it) is not expressible. The whole
 SDK has to compile as one file.
 
-**Status:** zaplang-io/zap#283 landed (Stage A intra-project + Stage B package
-imports). `import aws.core` and qualified `core.foo(...)` (with keyword args)
-work. **Not yet adopted here:** local-module resolution is rooted at the *entry
-file's own directory*, so `zap run tests/x.zap` looks for `tests/aws/core.zap`,
-not `src/aws/core.zap`. Adopting `import` therefore means either relocating every
-runnable entry (tests, examples) beside the `aws/` package, or shipping the core
-as a materialized zenv dependency — a repo re-layout that is out of scope for an
-ergonomic rewrite of the clients. `zap test` also does not yet resolve local
-module imports in discovered test files (it compiles each standalone).
+**Resolved + adopted (#339 step 1).** zaplang-io/zap#283 landed (Stage A
+intra-project + Stage B package imports), and this repo now adopts it: aws-core
+ships as a **zenv package** `aws_core` under `aws-core/`, its modules import each
+other with bare intra-package imports (`import core`, `import binding`, …), and
+the test/example entries consume it as a path dependency
+(`import aws_core.<module>`). Because a dependency import resolves through the
+project zenv (`$ZAP_ZENV/pkg/aws_core`, chosen by the dependency's logical name)
+rather than the entry file's own directory, the old entry-dir-rooting obstacle
+does not apply to the dependency path — the entries can live in `tests/` /
+`examples/` unchanged. `tools/bundle.py` and `tools/zrun.sh` are retired;
+`tools/run-tests.sh` materializes the zenv and runs each entry with `zap run`.
+See [DECISIONS.md](DECISIONS.md) (D-0001) for the full layout + import contract.
 
-**Workaround:** keep the modules split under `src/aws/` for structure and stitch
-them with `tools/bundle.py` (concatenate + de-dup imports) into one file per
-runnable program, as before.
+One cycle had to be broken: `core` ↔ `endpoints` (D-0081 rejects import cycles).
+`core`'s host shims and the `Endpoint` type moved into `endpoints`, leaving
+`core` a pure signing/transport base. No serialization behavior changed, so the
+byte-diff oracle is unaffected.
 
-**Issue:** zaplang-io/zap#283 (follow-up: adopt `import` + the entry-dir-rooting
-/ `zap test` resolution notes above)
+**Issue:** zaplang-io/zap#283 (adopted here via #339).
 
 ## 2. Strings are opaque at run time  — RESOLVED (zaplang-io/zap#284/#285/#335)
 

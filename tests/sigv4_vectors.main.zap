@@ -15,6 +15,9 @@
 #
 # Run:  tools/zrun.sh src/aws/core.zap src/aws/endpoints.zap tests/sigv4_vectors.main.zap
 
+import aws_core.core
+import crypto
+
 def main():
     # --- published example inputs ---------------------------------------
     auto secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
@@ -28,7 +31,7 @@ def main():
     auto ctype = "application/x-www-form-urlencoded; charset=utf-8"
 
     # --- canonical request (GET, empty body) ----------------------------
-    auto body_hash = payload_hash("")
+    auto body_hash = core.payload_hash("")
     # expect: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
     print(body_hash)
 
@@ -37,24 +40,31 @@ def main():
     headers["content-type"] = ctype
     headers["host"] = host
     headers["x-amz-date"] = amz_date
-    auto canon_headers = canonical_headers(headers)
-    auto signed = signed_headers(headers)
-    auto creq = canonical_request("GET", "/", query, canon_headers, signed, body_hash)
+    auto canon_headers = core.canonical_headers(headers)
+    auto signed = core.signed_headers(headers)
+    auto creq = core.canonical_request(
+        "GET",
+        "/",
+        query,
+        canon_headers,
+        signed,
+        body_hash,
+    )
     # expect: f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59
     print(crypto.sha256(creq))
 
     # --- signing key fingerprint ----------------------------------------
-    auto key = signing_key(secret, date_stamp, region, service)
+    auto key = core.signing_key(secret, date_stamp, region, service)
     # AWS publishes sha256(kSigning). expect:
     # 30ded1dcf033502869c8051e7ccce37762f623ba1660a832b4f1221f07d07e27
     print(crypto.sha256(key))
 
     # --- string to sign + signature -------------------------------------
-    auto cred_scope = credential_scope(date_stamp, region, service)
-    auto sts = string_to_sign(amz_date, cred_scope, creq)
-    auto signature = sign(key, sts)
+    auto cred_scope = core.credential_scope(date_stamp, region, service)
+    auto sts = core.string_to_sign(amz_date, cred_scope, creq)
+    auto signature = core.sign(key, sts)
     # expect: 5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7
     print(signature)
 
     # --- Authorization header -------------------------------------------
-    print(authorization_header(access, cred_scope, signed, signature))
+    print(core.authorization_header(access, cred_scope, signed, signature))
