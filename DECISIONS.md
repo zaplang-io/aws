@@ -362,3 +362,96 @@ per waiter and a typed `wait_<name>(client, input)` that builds the poll closure
 (re-sign + send + parse) and calls `aws_core.waiters.wait`. Tracked as an
 aws-codegen follow-up; the real fixtures in `tests/waiters.main.zap` are the shape
 that generator must reproduce.
+
+## D-0005 — request/response middleware is a composable interceptor chain in aws-core (2026-10-30)
+
+**Status:** accepted (ticket #362, AWS Phase 4).
+
+**Governing decisions.** D-0011 §7 (aws-core owns the request-lifecycle seams —
+retry, pagination, waiting, and now the interceptor chain); zap D-0067/I#163
+(first-class function values + closures). Follows D-0002/D-0003/D-0004 as another
+purely additive aws-core runtime layer and the LAST Phase 4 runtime item.
+
+**Context.** Cross-cutting behavior — logging, custom/signed headers, request-id
+/ tracing, metrics, mutating a request or transforming a response/error — needs a
+place to live that is NOT the signer or the transport. botocore has its event
+system and the modern AWS SDKs the smithy interceptor model: typed hook points
+around the request lifecycle. aws-core already decomposes that lifecycle into
+`sign_request` → `send` → `parse_error`, and Zap now has first-class function
+values (D-0067), so the hooks can be plain `fn(T) -> T` values composed into an
+ordered chain.
+
+**Decision.** The capability is a new generic module `aws_core.middleware`: a
+record of per-phase function-value hooks and a thin dispatcher that runs them
+around the existing pipeline. New public surface:
+
+- `struct Interceptor { str name; fn(Request)->Request before_sign;
+  fn(str)->str before_send; fn(Response)->Response after_receive;
+  fn(AwsError)->AwsError on_error }` — the four phases, each `fn(T) -> T`. The
+  identity hooks `identity_request/str/response/error` are the no-op defaults.
+- `new_interceptor(name)` (all phases identity) plus copy-updaters
+  `with_before_sign/with_before_send/with_after_receive/with_on_error` — a caller
+  sets only the phases it needs. (A defaulted-fn-argument constructor was avoided
+  deliberately: a default VALUE that is a function value is not exercised by any
+  zap golden test, whereas struct construction with function-value fields and
+  passing a function value to a `fn(...)` parameter both are — so the builder uses
+  only proven ground.)
+- `struct Chain { list[Interceptor] interceptors }` with `new_chain` /
+  `chain_of` / `chain_add` (copy-on-add). The list order IS the onion order:
+  index 0 is the outermost layer.
+- `dispatch_with(chain, creds, req, amz_date, date_stamp, fn(str)->Response)
+  -> Dispatched` — the dispatcher: `before_sign → core.sign_request →
+  before_send → send_fn → after_receive → (on non-2xx) parse_error → on_error`.
+  The transport is a `fn(str) -> Response` seam (mirroring aws.retry's
+  `fn() -> Response` and aws.waiters' `fn() -> Poll`): the live wrappers
+  `dispatch` / `dispatch_now` fill it with a `core.send` closure, and the offline
+  test injects a canned responder. `Dispatched { Response response;
+  Optional[AwsError] error }` carries the (post-after_receive) Response and, for a
+  non-2xx response, the parsed-and-transformed error.
+
+**Ordering (the onion).** Request-direction phases (before_sign, before_send)
+run in REGISTRATION order; response-direction phases (after_receive, on_error)
+run in REVERSE registration order. For a chain `[A, B, C]` the before_sign order
+is `A, B, C` and the after_receive order is `C, B, A` — predictable, like layered
+HTTP middleware.
+
+**Mutation vs. observation.** Every hook is `fn(T) -> T` and returns the
+(possibly new) value threaded to the next phase, so an interceptor may MUTATE
+(return a changed value — e.g. a before_sign that adds a header, which is then
+part of the signed canonical request) or merely OBSERVE (return its input after a
+side effect). Mutation is functional (return a new value), never in-place aliasing
+of the caller's Request. Short-circuiting a request before transport is
+intentionally out of scope for v1 (a documented follow-up); the four
+observe/mutate phases cover the enumerated cross-cutting cases.
+
+**Additive by construction (byte-diff oracle unchanged).** The dispatcher is a
+thin wrapper: with an EMPTY chain every `apply_*` is the identity, so `dispatch`
+reduces to exactly `core.send(host, core.sign_request(creds, req, ...))` — the
+same signed bytes and the same behavior as before. No existing request
+serialization changes; the module is only on the path of callers that build a
+`Chain` and route through it. The `Dispatched.error` field is additive — callers
+that want only the Response ignore it.
+
+**Verification.** Correctness is proven host-side, without the Zap
+toolchain/Docker, by extending `tools/verify_vectors.py` with an independent
+Python reimplementation of the engine (`middleware()`: the same onion ordering,
+the same before_sign→sign→before_send→send→after_receive→on_error dispatch, and
+the same SigV4 signer that proves the other vectors). It asserts the pinned facts
+in `tests/expected/middleware.expected`: the onion order over a 3-interceptor
+chain, that a before_sign-added `x-trace-id` changes the signed-header set AND the
+SigV4 signature AND appears on the wire (proving it was signed, not merely
+appended), the response-header and error-code transforms, and that an empty chain
+signs byte-for-byte identically to the direct `core.sign_request` path.
+`tests/middleware.main.zap` reproduces the same facts through `aws_core.middleware`
+and is run by `tools/run-tests.sh` under the real toolchain in CI. Docker was not
+run (it kernel-panics the dev host); the local `zap` debug build predates the
+`fn(...)->...` and qualified-type-parameter syntax aws-core uses, so the `.zap`
+files were gated host-side via a length-faithful stub-typed probe (`zap fmt` over
+the fn-free/dequalified skeleton, which validated indentation, bracket balance and
+the 88-column canonical form) plus the Python oracle, and CI (the
+`ghcr.io/zaplang-io/zap:latest` image) is the authoritative compile+run gate.
+
+**Follow-ups.** (1) A short-circuit / handler-wrap variant (`fn(Handler)->Handler`)
+for interceptors that answer a request without transport. (2) Wiring the chain
+into the generated per-service clients (aws-codegen) so a client carries a default
+Chain. Both tracked as follow-ups; the engine here is the service-agnostic base.

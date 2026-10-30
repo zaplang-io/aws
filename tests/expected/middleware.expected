@@ -1,0 +1,15 @@
+== additive ==
+empty-chain raw identical: True
+empty-chain status: 200
+empty-chain error: False
+== signed mutation ==
+signed headers base: host;x-amz-date
+signed headers traced: host;x-amz-date;x-trace-id
+signature changed: True
+wire has trace header: True
+== order ==
+A.in B.in C.in A.send B.send C.send C.out B.out A.out
+== after_receive ==
+x-handled: yes
+== on_error ==
+error: wrapped:NoSuchKey status 400
