@@ -1,0 +1,14 @@
+== classify ==
+rest-xml NoSuchKey -> NoSuchKey
+rest-xml NoSuchBucket -> NoSuchBucket
+awsJson #AccessDenied -> AccessDenied
+rest-json header EntityTooLarge -> EntityTooLarge
+rest-xml InvalidArgument -> Unknown(InvalidArgument)
+== carrier ==
+code=NoSuchKey request-id=ABC123 status=404
+format: NoSuchKey: The specified key does not exist. (request-id=ABC123, http-status=404)
+== success ==
+error present: False
+check_response raised on 200: False
+== raise bridge ==
+caught: NoSuchKey: The specified key does not exist. (request-id=ABC123, http-status=404)

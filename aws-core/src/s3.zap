@@ -25,6 +25,7 @@
 # choice (see `resolve_s3`).
 import core
 import endpoints
+import errors
 
 def s3_host(str bucket, str region) -> str:
     return endpoints.s3_virtual_host_for(bucket, region, endpoints.default_s3_options())
@@ -157,3 +158,88 @@ def list_objects_v2_request(
         body="",
     )
     return core.sign_request(creds, req, amz_date, date_stamp)
+
+# ---------------------------------------------------------------------------
+# Typed errors (#361) — the per-service enum + classifier aws-codegen emits
+# ---------------------------------------------------------------------------
+#
+# This is the hand-wired S3 proof of the typed-error contract in `errors.zap`
+# (DECISIONS.md D-0006): the open-enum shape and the classifier aws-codegen will
+# generate for every service from its modeled error shapes. A representative S3
+# error set is modeled by name; every other code (new shapes, cross-service
+# surprises) lands in `Unknown(code)`, so a caller built against this model keeps
+# working when S3 adds an error. These S3 codes are the rest-xml `<Error><Code>`
+# spellings botocore maps.
+
+# S3's modeled service errors (a representative subset) + the open-enum catch-all.
+enum S3ErrorKind:
+    NoSuchKey
+    NoSuchBucket
+    NoSuchUpload
+    BucketAlreadyExists
+    BucketAlreadyOwnedByYou
+    InvalidObjectState
+    EntityTooLarge
+    SignatureDoesNotMatch
+    AccessDenied
+    Unknown(str code)
+
+# Classify an AWS error code into `S3ErrorKind`. The code is normalized first
+# (`errors.error_code` strips any namespace/suffix), then matched by name; an
+# unmodeled code becomes `Unknown(name)`, carrying the normalized code.
+def s3_error_kind(str code) -> S3ErrorKind:
+    auto name = errors.error_code(code)
+    if name == "NoSuchKey":
+        return S3ErrorKind.NoSuchKey
+    if name == "NoSuchBucket":
+        return S3ErrorKind.NoSuchBucket
+    if name == "NoSuchUpload":
+        return S3ErrorKind.NoSuchUpload
+    if name == "BucketAlreadyExists":
+        return S3ErrorKind.BucketAlreadyExists
+    if name == "BucketAlreadyOwnedByYou":
+        return S3ErrorKind.BucketAlreadyOwnedByYou
+    if name == "InvalidObjectState":
+        return S3ErrorKind.InvalidObjectState
+    if name == "EntityTooLarge":
+        return S3ErrorKind.EntityTooLarge
+    if name == "SignatureDoesNotMatch":
+        return S3ErrorKind.SignatureDoesNotMatch
+    if name == "AccessDenied":
+        return S3ErrorKind.AccessDenied
+    return S3ErrorKind.Unknown(name)
+
+# Convenience: classify straight from a typed carrier.
+def s3_error_kind_of(errors.AwsServiceError e) -> S3ErrorKind:
+    return s3_error_kind(e.code)
+
+# The canonical name of a classified S3 error. The `match` is exhaustive over
+# every variant (the compiler enforces it), so adding a variant to `S3ErrorKind`
+# forces this to be updated — the generator emits both together. `Unknown` is
+# rendered with its carried code. This dispatcher lives in the service module so
+# the `match` is module-local (a caller passes the typed value in and gets the
+# name/branch out), which is the portable pattern until the compiler resolves
+# module-qualified variant patterns in a caller's own `match` (see DECISIONS.md
+# D-0006).
+def s3_error_name(S3ErrorKind k) -> str:
+    match k:
+        case S3ErrorKind.NoSuchKey:
+            return "NoSuchKey"
+        case S3ErrorKind.NoSuchBucket:
+            return "NoSuchBucket"
+        case S3ErrorKind.NoSuchUpload:
+            return "NoSuchUpload"
+        case S3ErrorKind.BucketAlreadyExists:
+            return "BucketAlreadyExists"
+        case S3ErrorKind.BucketAlreadyOwnedByYou:
+            return "BucketAlreadyOwnedByYou"
+        case S3ErrorKind.InvalidObjectState:
+            return "InvalidObjectState"
+        case S3ErrorKind.EntityTooLarge:
+            return "EntityTooLarge"
+        case S3ErrorKind.SignatureDoesNotMatch:
+            return "SignatureDoesNotMatch"
+        case S3ErrorKind.AccessDenied:
+            return "AccessDenied"
+        case S3ErrorKind.Unknown(c):
+            return "Unknown(" + c + ")"

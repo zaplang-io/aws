@@ -63,6 +63,7 @@ run_case credentials_chain
 run_case restjson_binding
 run_case restxml_codec
 run_case query_codec
+run_case typed_errors
 
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2
