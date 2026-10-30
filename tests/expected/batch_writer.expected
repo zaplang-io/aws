@@ -1,0 +1,18 @@
+== flush-sizes ==
+sizes 25,25,10
+calls 3
+buffered 0
+== unprocessed ==
+sizes 3,2
+calls 2
+call0 {"RequestItems":{"T":[{"PutRequest":{"Item":{"id":{"S":"a"}}}},{"PutRequest":{"Item":{"id":{"S":"b"}}}},{"PutRequest":{"Item":{"id":{"S":"c"}}}}]}}
+call1 {"RequestItems":{"T":[{"PutRequest":{"Item":{"id":{"S":"b"}}}},{"PutRequest":{"Item":{"id":{"S":"c"}}}}]}}
+== exit-flush ==
+mid-buffered 2
+sizes 2
+calls 1
+== dedup ==
+dedup-buffered 2
+body {"RequestItems":{"Users":[{"PutRequest":{"Item":{"id":{"S":"other"},"name":{"S":"keep"}}}},{"PutRequest":{"Item":{"id":{"S":"dup"},"name":{"S":"latest"}}}}]}}
+== wire-body ==
+BODY {"RequestItems":{"Users":[{"PutRequest":{"Item":{"age":{"N":"30"},"id":{"S":"a"}}}},{"DeleteRequest":{"Key":{"id":{"S":"b"}}}}]}}

@@ -6,4 +6,4 @@ version = 1
 name = "aws_core"
 version = "0.1.0"
 source = "path+aws-core"
-checksum = "zap1:e2f4742c22609c169bf1ece42d432b9b7beeb85f2b5f96af8d168987728fc33f"
+checksum = "zap1:f59130780a8f619d06273df9c54c4465d4517a085bbd417269cfb5ca78ebb201"
