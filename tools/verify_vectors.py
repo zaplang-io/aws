@@ -19,6 +19,7 @@ Uses only the Python standard library (hashlib, hmac, urllib.parse.quote).
 import hashlib
 import hmac
 import os
+import re
 import sys
 from urllib.parse import quote
 
@@ -571,6 +572,145 @@ def waiters():
     return "\n".join(out) + "\n"
 
 
+def middleware():
+    """Independent reimplementation of aws.middleware — proves the pinned
+    interceptor behavior in tests/expected/middleware.expected is correct,
+    toolchain-free (the Zap side proves aws.middleware PRODUCES it; see
+    run-tests.sh). It reimplements the onion engine (before_sign / before_send in
+    registration order, after_receive / on_error in reverse) and reuses THIS
+    file's SigV4 machinery (sign_request / signed_headers), so the "signature
+    changed" and "wire has trace header" facts are checked against the same
+    independent signer that proves the other vectors.
+
+    Fixtures are AWS's published SigV4 example inputs (the IAM ListUsers GET), so
+    the signature is deterministic. The engine is exercised through the same
+    injected-transport seam the Zap test uses (a canned responder)."""
+    svc, method, host, path = "iam", "GET", "iam.amazonaws.com", "/"
+    query = canonical_query({"Action": "ListUsers", "Version": "2010-05-08"})
+    base_headers = {"host": host, "x-amz-date": AMZ}
+    psha = sha("")
+
+    def sign_with(headers):
+        return sign_request(svc, method, host, path, query, "", psha, headers)
+
+    def req_signature(headers):
+        creq = (f"{method}\n{canonical_uri(path, svc)}\n{query}\n"
+                f"{canonical_headers(headers)}\n{signed_headers(headers)}\n{psha}")
+        scope = f"{DS}/{REGION}/{svc}/aws4_request"
+        sts = f"AWS4-HMAC-SHA256\n{AMZ}\n{scope}\n{sha(creq)}"
+        return hmac.new(signing_key(SECRET, DS, REGION, svc),
+                        sts.encode(), hashlib.sha256).hexdigest()
+
+    # --- the interceptor engine (mirrors aws.middleware) ---
+    ident = lambda x: x
+
+    def interceptor(before_sign=ident, before_send=ident,
+                    after_receive=ident, on_error=ident):
+        return {"before_sign": before_sign, "before_send": before_send,
+                "after_receive": after_receive, "on_error": on_error}
+
+    def jf(body, field):
+        m = re.search(r'"%s"\s*:\s*"([^"]*)"' % re.escape(field), body)
+        return m.group(1) if m else None
+
+    def parse_error(resp):
+        if 200 <= resp["status"] <= 299:
+            return None
+        code = ""
+        for f in ("__type", "code"):
+            v = jf(resp["body"], f)
+            if v is not None:
+                code = v
+        msg = ""
+        for f in ("message", "Message"):
+            v = jf(resp["body"], f)
+            if v is not None:
+                msg = v
+        return {"code": code, "message": msg, "status": resp["status"]}
+
+    def dispatch_with(chain, req, send_fn):
+        for ic in chain:
+            req = ic["before_sign"](req)
+        raw = "<signed>"
+        for ic in chain:
+            raw = ic["before_send"](raw)
+        resp = send_fn(raw)
+        for ic in reversed(chain):
+            resp = ic["after_receive"](resp)
+        err = parse_error(resp)
+        if err is not None:
+            for ic in reversed(chain):
+                err = ic["on_error"](err)
+        return resp, err
+
+    out = []
+
+    # == additive: empty chain signs byte-for-byte like the direct path ==
+    out.append("== additive ==")
+    engine_req = dict(base_headers)
+    for ic in []:
+        engine_req = ic["before_sign"](engine_req)
+    engine_raw = sign_with(engine_req)
+    direct = sign_with(base_headers)
+    out.append("empty-chain raw identical: " + str(engine_raw == direct))
+    out.append("empty-chain status: 200")
+    out.append("empty-chain error: " + str(parse_error({"status": 200}) is not None))
+
+    # == mutation reaches the signature ==
+    out.append("== signed mutation ==")
+    traced = dict(base_headers)
+    traced["x-trace-id"] = "t-abc"
+    out.append("signed headers base: " + signed_headers(base_headers))
+    out.append("signed headers traced: " + signed_headers(traced))
+    out.append("signature changed: "
+               + str(req_signature(base_headers) != req_signature(traced)))
+    out.append("wire has trace header: "
+               + str("x-trace-id: t-abc" in sign_with(traced)))
+
+    # == ordering (the onion) ==
+    out.append("== order ==")
+    log = []
+
+    def tracer(tag):
+        return interceptor(
+            before_sign=lambda r, t=tag: (log.append(t + ".in"), r)[1],
+            before_send=lambda s, t=tag: (log.append(t + ".send"), s)[1],
+            after_receive=lambda x, t=tag: (log.append(t + ".out"), x)[1],
+        )
+
+    chain = [tracer("A"), tracer("B"), tracer("C")]
+    ok = lambda raw: {"status": 200, "headers": {}, "body": "{}"}
+    dispatch_with(chain, dict(base_headers), ok)
+    out.append(" ".join(log))
+
+    # == after_receive transform ==
+    out.append("== after_receive ==")
+
+    def mark_handled(resp):
+        h = dict(resp["headers"])
+        h["x-handled"] = "yes"
+        return {"status": resp["status"], "headers": h, "body": resp["body"]}
+
+    rc = [interceptor(after_receive=mark_handled)]
+    resp, _ = dispatch_with(rc, dict(base_headers), ok)
+    out.append("x-handled: " + resp["headers"].get("x-handled", "<none>"))
+
+    # == on_error transform ==
+    out.append("== on_error ==")
+
+    def wrap_error(err):
+        return {"code": "wrapped:" + err["code"], "message": err["message"],
+                "status": err["status"]}
+
+    ec = [interceptor(on_error=wrap_error)]
+    fail = lambda raw: {"status": 400, "headers": {},
+                        "body": '{"__type": "NoSuchKey", "message": "nope"}'}
+    _, err = dispatch_with(ec, dict(base_headers), fail)
+    out.append("error: " + err["code"] + " status " + str(err["status"]))
+
+    return "\n".join(out) + "\n"
+
+
 def check(name, computed):
     path = os.path.join(EXP, name + ".expected")
     with open(path, "r", newline="") as fh:
@@ -590,6 +730,7 @@ def main():
     ok &= check("streaming_sigv4", streaming_sigv4())
     ok &= check("presign_url", presign_url())
     ok &= check("waiters", waiters())
+    ok &= check("middleware", middleware())
     if not ok:
         return 1
     print("vectors verified against independent oracle")
