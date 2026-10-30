@@ -43,9 +43,10 @@
 # Native<->AttributeValue marshalling is ticket #434, queued separately. For #433
 # we mirror the builder exactly: `AttrValue` carries a scalar and renders to the
 # raw-value JSON the builder produces (string -> "x", number -> bare digits,
-# bool -> true/false, null -> null). `AttrValue` is the clean seam #434 slots
-# into — it will add native int/float/Decimal/bytes coercion and the
-# AttributeValue wire form; nothing else in this module needs to change.
+# bool -> true/false, null -> null). `AttrValue` is the clean seam #434 slotted
+# into: `aws_core.marshal` (ticket #434) adds the native<->AttributeValue wire
+# marshalling and bridges this scalar in via `marshal.from_scalar(AttrValue)`, so
+# a condition's `ExpressionAttributeValues` flow through it — no change here.
 
 # --- AttrValue: a condition operand value (the #434 seam) -------------------
 
