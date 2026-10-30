@@ -17,6 +17,7 @@
 #   import aws_core.awsjson     # awsJson 1.0/1.1 codec
 #   import aws_core.restjson    # rest-json codec
 #   import aws_core.restxml     # rest-xml codec
+#   import aws_core.dynamic     # opt-in dynamic call() escape hatch (#365)
 #
 # Zap v1 has no re-export form (D-0081 §3), so this root module exposes only the
 # package version; consumers import the submodule they need. The hand-written

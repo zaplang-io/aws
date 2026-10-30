@@ -725,7 +725,7 @@ def middleware():
 # float). The pinned vectors (the hand-rolled struct plus the CloudWatch
 # PutMetricData and Translate TranslateText shapes — two of the 25 cbor-only
 # services) were cross-checked against botocore's own serializer when authored
-# (see DECISIONS.md D-0007); this re-derivation keeps the fixture honest on a
+# (see DECISIONS.md D-0008); this re-derivation keeps the fixture honest on a
 # runner that has no botocore. The value model is a tagged tuple so the Zap test
 # and this oracle agree on structure:
 #   ("int",n) ("bool",b) ("null",) ("text",s) ("blob",bytes)

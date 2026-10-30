@@ -576,7 +576,99 @@ the fuller ergonomics, reusing the SAME generated enums: (a) module-qualified
 enum variant patterns in a caller's `match`; (b) type-directed `except` dispatch
 (and `raise` of a typed payload) so `except <Service>ErrorKind.<Shape>:` works.
 
-## D-0007 — smithy-rpc-v2-cbor codec: aws-core foundation, emitter deferred (2026-10-30)
+## D-0007 — the dynamic `call()` escape hatch is a thin envelope over the primitives, not a model loader (2026-10-30)
+
+**Status:** accepted (ticket #365). Purely additive aws-core surface — like
+D-0002/D-0003/D-0004/D-0005/D-0006 it adds a module and reuses the signing/
+transport/endpoint primitives, touching no signing/codec/oracle path.
+
+**Governing decisions.** D-0011 §8 (aws-core is the bounded hand-written runtime
+the generated clients ride on); aws-codegen D-0001 (**generated-is-product**: the
+typed per-service clients are the shipping SDK). This escape hatch is explicitly
+the *non*-product path: the fallback for operations the generated clients do not
+cover.
+
+**Context.** Generated-op coverage is ~97% after the #364 rollout + the #424/#426
+gap fixes. The uncovered remainder is (1) a small residual of skipped ops and
+(2) the 25 `smithy-rpc-v2-cbor` services, which have no codec yet (#428). #365
+asks for an "opt-in dynamic `call(name, params)`" so those operations are
+reachable without a user hand-rolling SigV4 + transport + endpoint resolution
+every time.
+
+**The one design question — HOW dynamic.** The ticket's `call(name, params)`
+strawman reads like a botocore-style runtime model loader (load the Smithy model,
+project an arbitrary operation by name). Rejected, for two reasons:
+- **It fights AOT/LLVM.** Zap compiles ahead of time; the shapes a program
+  touches must be known to the compiler. A runtime model loader that
+  materializes arbitrary input/output shapes from JSON has no typed surface to
+  compile against — it would be an interpreter bolted onto an AOT language.
+- **It undercuts generated-is-product.** A general dynamic client becomes a
+  second, parallel SDK surface competing with the typed one, exactly what D-0001
+  rules out. The escape hatch must stay visibly *lesser* than the generated
+  clients — a raw-bytes fallback, not an alternative front door.
+
+**Decision.** `aws_core.dynamic` is a **thin envelope over aws.core's existing
+primitives**. The CALLER supplies every wire detail — `service`, `region`, HTTP
+`method`, `path`, `query`, `headers`, a **pre-serialized `body`**, an optional
+`host`, and a `PathMode` — and `call()` does only the three tedious, mechanical
+steps: endpoint resolution, SigV4 signing, and send/parse. It owns **no protocol
+framing**: the caller serializes the body and sets the Content-Type, an awsJson
+`X-Amz-Target`, a CBOR `smithy-protocol` header, etc. New public surface:
+
+- `enum PathMode { Decoded, PreEncoded }` — which signer the request rides.
+- `struct DynamicRequest { method, service, region, host, path, query, headers,
+  body, path_mode }` and `dynamic_request(...)` (all but method/service/region
+  defaulted).
+- `resolve_host(req)` — the caller's `host`, else `endpoints.regional_host`.
+- `signing_headers(req, host, amz_date)` / `build_request(req, host, amz_date)` —
+  inject the three SigV4 transport headers (host, x-amz-date, x-amz-content-sha256,
+  the last only when the caller did not set one) so the header set MATCHES what
+  `awsjson_headers` / `query_build_request` / `binding_headers` produce.
+- `sign_dynamic(creds, req, amz_date, date_stamp)` / `sign_dynamic_now(...)` —
+  sign to ready-to-send HTTP/1.1 text.
+- `call(creds, req) -> core.Response` — resolve + sign (now) + `core.send`.
+- `call_error(resp) -> Optional[errors.AwsServiceError]` and
+  `call_checked(creds, req)` — typed-error mapping via aws_core.errors (#361).
+
+**Signs identically — the load-bearing property.** `sign_dynamic` does not
+reimplement signing; it dispatches on `PathMode` to the SAME two signer entry
+points the generated clients use:
+- `Decoded` → `core.sign_request` (the POST-"/" protocols awsJson/query and any
+  decoded-path op; the signer percent-encodes the path, double-encoding the
+  canonical URI off S3).
+- `PreEncoded` → `binding.binding_sign` (the REST protocols and the CBOR
+  services, whose `path` is already wire-encoded, so the signer must not
+  re-encode).
+Because `build_request` produces a `core.Request` with the same field values a
+codec produces, the canonical request — hence the signature and the on-wire bytes
+— is byte-identical to the generated/oracle path for identical inputs.
+
+**Proof.** `tests/dynamic_call.main.zap` (pinned in
+`tests/expected/dynamic_call.expected`, run by `tools/run-tests.sh`) builds three
+representative requests both ways and asserts byte equality: an awsJson op
+(DynamoDB GetItem) vs `aws_core.dynamodb`/`core.sign_request`; a query op (STS
+GetCallerIdentity) vs `aws_core.query`/`core.sign_request`; and a CBOR-style
+PreEncoded op vs `binding.binding_sign`. The codec paths are themselves pinned
+against botocore in `service_signing.expected` and re-derived by
+`tools/verify_vectors.py`, so "identical to the codec path" transitively means
+"identical to botocore".
+
+**No retries baked in.** `call()` is a single sign+send. The retry seam
+(`aws_core.retry`) is protocol-agnostic and wraps a signed-request thunk, so a
+caller that wants standard retry mode composes it around `call()` exactly as the
+generated clients do — kept out of the escape hatch to leave the composition
+explicit.
+
+**Docker was not run** (it kernel-panics the dev host, standing rule) and the
+local `zap` debug build is behind main. Host validation used a front-end-only
+`zap` built from a throwaway `origin/main` worktree (`cargo build -p zapc --bin
+zap`, no LLVM): `zap fmt --check` is clean on the new module + test (and the whole
+repo), and `zap ir tests/dynamic_call.main.zap` type-checks the full dynamic path
+(module + imports + the cross-module `PathMode` value + the `match` dispatch)
+clean. `tools/verify_vectors.py` is green on the vectors the test anchors on. CI
+(`ghcr.io/zaplang-io/zap:latest`) is the authoritative compile+run gate.
+
+## D-0008 — smithy-rpc-v2-cbor codec: aws-core foundation, emitter deferred (2026-10-30)
 
 **Status:** accepted (ticket #428, part 1). aws-core foundation half; the
 aws-codegen emitter + `models/manifest.json` entries for the 25 cbor-only
