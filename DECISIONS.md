@@ -283,3 +283,82 @@ fixture `tests/expected/presign_url.expected` and the Zap entry
 CI) reproduce the same bytes. Docker was not run (it kernel-panics the dev host);
 CI is the authoritative toolchain gate, with the Python oracle as the
 toolchain-free second implementation.
+
+## D-0004 — waiters are a generic poll-until-state engine in aws-core (2026-10-30)
+
+**Status:** accepted (ticket #360, AWS Phase 4).
+
+**Governing decisions.** D-0011 §7 (aws-core owns the request-lifecycle seams —
+retry, pagination, and now waiting); aws-codegen D-0001 (generated-is-product;
+aws-core is the runtime those clients ride on). Follows D-0002/D-0003 as another
+purely additive aws-core runtime layer.
+
+**Context.** A waiter repeatedly calls one operation until the resource it
+describes reaches a desired state ("wait until this bucket exists", "wait until
+this instance is running"). botocore models each waiter in `waiters-2.json` as
+`{delay, maxAttempts, operation, acceptors[]}`, where each acceptor is
+`{state, matcher, argument, expected}`: the engine polls the operation, evaluates
+the acceptors in order against each response, and transitions to the first
+match's `state` (success | failure | retry). The matchers are `status` (HTTP
+status), `error` (AWS error code), and `path`/`pathAll`/`pathAny` (a JMESPath into
+the parsed response compared to `expected`).
+
+**Decision.** The capability is added as a new **generic** module
+`aws_core.waiters` — the ENGINE only. Per-service waiter TABLES (one config per
+`waiters-2.json` entry) are emitted by **aws-codegen** and are a follow-up
+(below); the engine here is service-agnostic. New public surface:
+
+- `struct Acceptor { int64 state; int64 matcher; str argument; str expected }`
+  and `struct WaiterConfig { str name; int64 delay; int64 max_attempts;
+  list[Acceptor] acceptors }` — the `waiters-2.json` shape. `operation` is
+  deliberately NOT modeled: which operation to call and how to sign it is the
+  caller's poll closure, keeping the engine independent of any service's request
+  builders. State constants `state_retry/success/failure`, matcher constants
+  `matcher_status/error/path/path_all/path_any`, and acceptor constructors
+  (`acceptor_status/error/path/path_all/path_any`) — what a generated table emits.
+- `evaluate(acceptors, resp, parsed) -> int64` — the first matching acceptor's
+  state, or `state_retry` when none matched (botocore's "keep polling" default).
+- `struct Poll { Response response; JsonValue parsed }` and
+  `wait(cfg, fn() -> Poll) -> WaiterOutcome` — the loop: poll, evaluate, sleep
+  `delay` between polls, stop on a success/failure acceptor or at `max_attempts`
+  (timeout). `WaiterOutcome { int64 result; int64 attempts; Response response }`
+  with results `result_success/failure/timeout`. The `fn() -> Poll` seam mirrors
+  aws.retry's `fn() -> Response` — tests inject canned polls, the live path uses
+  `send_poll`.
+- `send_poll(host, creds, req) -> Poll` — the live convenience: re-sign with a
+  fresh SigV4 timestamp, send, and parse the JSON body into the matcher DOM
+  (`parse_body`), the waiter analogue of `send_request_with_retry`.
+
+**Parsed-response seam.** `path`/`pathAll`/`pathAny` evaluate over a `JsonValue`
+DOM (the compiler-known prelude enum), exactly as botocore runs JMESPath over the
+deserialized output — independent of the JSON vs XML wire format. The engine
+implements the JMESPath subset waiter arguments use: dotted field access with
+`[]` flatten projections (e.g. `Table.TableStatus`,
+`Reservations[].Instances[].State.Name`). JSON protocols parse the body with
+`json.loads` (`parse_body` / `send_poll`); an XML protocol supplies its own
+body→`JsonValue` adapter. This is additive — no signing, codec, or byte-diff
+oracle behavior changes.
+
+**Verification.** Correctness is proven host-side, without the Zap
+toolchain/Docker, by extending `tools/verify_vectors.py` with an independent
+Python reimplementation of the engine (`waiters()`: the same matchers, JMESPath
+subset, and poll loop) that asserts the pinned transitions in
+`tests/expected/waiters.expected`. The fixtures are REAL `waiters-2.json` entries
+— S3 `BucketExists`/`BucketNotExists` (status matchers), DynamoDB `TableExists`
+(path + error matchers), and EC2 `InstanceRunning` (pathAll/pathAny over a
+flattening JMESPath) — so every matcher kind is exercised against genuine acceptor
+specs, including a loop that transitions retry→retry→success and a terminal
+failure. `tests/waiters.main.zap` reproduces the same transitions through
+`aws_core.waiters` and is run by `tools/run-tests.sh` under the real toolchain in
+CI. Docker was not run (it kernel-panics the dev host); the local `zap` debug
+build predates the qualified-type-parameter syntax aws-core already uses, so the
+`.zap` files were gated host-side via a stub-typed probe (`zap fmt`/`zap ir`
+front-end) plus the Python oracle, and CI (the `ghcr.io/zaplang-io/zap:latest`
+image) is the authoritative compile+run gate.
+
+**Follow-up (aws-codegen).** The per-service waiter tables are generated from each
+service's `waiters-2.json`: emit one `WaiterConfig` (with its `Acceptor` list)
+per waiter and a typed `wait_<name>(client, input)` that builds the poll closure
+(re-sign + send + parse) and calls `aws_core.waiters.wait`. Tracked as an
+aws-codegen follow-up; the real fixtures in `tests/waiters.main.zap` are the shape
+that generator must reproduce.

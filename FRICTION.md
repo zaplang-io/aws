@@ -262,6 +262,20 @@ for a missing feature any more.
   come from the hex-returning `crypto` functions), but now available for binary
   payloads (DynamoDB `B` attributes, etc.).
 
+- **The local `zap` debug build can lag the aws-repo's own syntax.** The checked-
+  out `git-zap/zap` (and the debug binary built from it) can predate features the
+  committed aws-core code already uses — e.g. qualified-type parameters/fields
+  (`def f(core.Response r)`, `core.Response field`), which even make CI-green
+  `retry.zap`/`core.zap` fail `zap fmt --check` locally with a parse error, and
+  dict-method resolution on non-`str`-valued dicts (`dict[str, JsonValue].get`
+  gives a spurious `ZAP6001` in isolated files though it resolves in `core.zap`).
+  The CI image `ghcr.io/zaplang-io/zap:latest` is newer and is the authoritative
+  gate (D-0002/D-0003/D-0004). For host-side confidence without Docker (which
+  kernel-panics the dev host), gate the novel logic with a **stub-typed probe**
+  (replace `core.*` qualified types with local stub structs so the old parser
+  accepts the file, then `zap fmt`/`zap ir` the probe) plus a toolchain-free
+  Python oracle (`tools/verify_vectors.py`).
+
 ## Net
 
 The cryptographic core (the hard part people worry about) was easy and correct

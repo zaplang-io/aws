@@ -1,0 +1,22 @@
+== config ==
+BucketExists delay 5 max 20 acc 4
+BucketNotExists delay 5 max 20 acc 1
+TableExists delay 20 max 25 acc 2
+InstanceRunning delay 15 max 40 acc 4
+== matchers ==
+be 200 -> success
+be 404 -> retry
+be 500 -> retry
+te active -> success
+te creating -> retry
+te missing -> retry
+ir running -> success
+ir terminated -> failure
+ir pending -> retry
+== loop ==
+bucket-exists: success attempts 3
+bucket-exists-timeout: timeout attempts 3
+bucket-not-exists: success attempts 1
+table-exists: success attempts 3
+instance-running: success attempts 2
+instance-failed: failure attempts 1

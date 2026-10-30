@@ -56,6 +56,7 @@ run_case streaming_sigv4
 run_case presign_url
 run_case awsjson_codec
 run_case retry
+run_case waiters
 run_case endpoints_resolution
 run_case credentials_chain
 run_case restjson_binding
