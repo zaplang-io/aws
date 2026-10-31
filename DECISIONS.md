@@ -1025,28 +1025,26 @@ zenv, including the generator methods and the function-typed-field call) emitted
 ZIR with no diagnostics. CI (`ghcr.io/zaplang-io/zap:latest`) is the authoritative
 compile+run gate.
 
-**Blocked on a toolchain codegen gap (zaplang-io/zap#453).** CI compiles cleanly
-but runs the paginator test with EMPTY stdout — a whole-program lowering failure,
-not a runtime crash (not even the first `print` runs). The front-end accepts it
-(`zap ir` clean); only the LLVM backend path fails. First filed as zap#451
-("generator method in an imported module yielding a struct"); zap#451's fix +
-bisection goldens (zap PR #452) made the GENERIC case pass (a generator method in
-a module yielding a simple all-scalar struct), but the aws paginator STILL emits
-empty output. Narrowing against #452's now-passing golden isolates a distinct,
-narrower trigger — tracked as **zap#453**: the generator's struct carries a
-**function-typed field** (the caller-supplied fetch closure) and `self` (holding
-it) is spilled across the `yield`. (The closure is reached only through a plain
-sibling method, never called inside the generator frame, and the yielded
-`Response` is not kept live across the suspend — so the fn-field-in-`self` is the
-suspect, not a mid-frame closure call or a dict-bearing yield.) This shape is
-intrinsic to a lazy paginator that calls a client closure, so it cannot be worked
-around while keeping `yield`. The decision stands as written (the engine is
-correct and the FE accepts it); the PR's CI is intentionally red pending the
-zap#453 fix. The proven D-0048 `__iter__`/`__next__` + `raise StopIteration`
-protocol (the `stop_iter` run-golden; closure in a plain `__next__`, never a
-coroutine frame) is the validated drop-in fallback — identical
-`for page in paginator.pages()` ergonomics, no API change — if we later choose not
-to wait on zap#453.
+**Toolchain history (now resolved — zaplang-io/zap#453, fixed by zap PR #455).**
+The engine shipped on the `yield` generator-method form, but for a stretch CI
+compiled cleanly yet ran the paginator test with EMPTY stdout — a whole-program
+LLVM-lowering failure the host front-end gate (`zap ir`, type-check only) could
+not see. First filed as zap#451 ("generator method in an imported module yielding
+a struct"); zap PR #452's bisection goldens showed the GENERIC case already
+lowered, isolating a narrower trigger filed as zap#453 — a generator body that
+spills loop/`self` state across the `yield` (the paginator's `items` method
+iterates a page's result list with `for it in page_items: yield it`, and the
+whole program fails to lower if any such generator does). zap PR #455
+(`fix(gen): spill a for-loop's induction state across yield`, touching
+`crates/ir/src/lower.rs`) fixed it. aws CI runs `ghcr.io/zaplang-io/zap:latest`;
+once the image rebuilt on #455, the paginator suite goes GREEN on the yield form
+with NO code change — `tests/paginators.main.zap` emits its four sections and
+`run_case paginators` reports `ok`. The host build never had LLVM-18 (Docker down
+on the dev host), so this class of backend-only failure was only ever visible in
+CI — CI remained the authoritative gate throughout. (A D-0048 `__iter__`/`__next__`
+iterator, closure in a plain `__next__` rather than a coroutine frame, was built
+and validated as a fallback but not needed; it remains the drop-in if a future
+regression reopens this.)
 
 **Follow-up (aws-codegen).** aws-codegen I#349 already emits per-op `paginate_<op>`
 generator methods that inline this loop. The follow-up is to have the generator
