@@ -1,0 +1,13 @@
+== multi-page ==
+pages 2
+tokens -,b
+items a b c
+== single-page ==
+pages 1
+tokens -
+== more-results gate ==
+pages 2
+tokens -,t1
+== accumulators ==
+all_pages 2
+all_items a b c
