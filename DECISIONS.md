@@ -1058,3 +1058,107 @@ that generated config must reproduce. A richer token model (parallel-list or map
 tokens, e.g. DynamoDB Query/Scan `ExclusiveStartKey`) and a full
 `build_full_result` that merges every output field (not just the result list) are
 later work.
+
+## D-0012 — waiter ergonomics: a `Waiter` handle + `wait_<name>` client helpers (2026-10-31)
+
+**Status:** accepted (ticket zaplang-io/zap#437, ergonomics epic #432 — the first
+ergonomics ticket).
+
+**Governing decisions.** D-0004 (the generic waiter ENGINE in `aws_core.waiters`,
+which this builds the boto3 surface on top of); D-0011 (paginators — the
+immediately prior engine+ergonomics pattern this mirrors); zaplang-io/zap D-0011 §7
+(aws-core owns the request-lifecycle seams); aws-codegen D-0001
+(generated-is-product; aws-core is the runtime the generated clients ride on). The
+ergonomics layer is HAND-WRITTEN on top of the generated client, not generated
+(like `conditions` / `marshal`, D-0009/D-0010) — purely additive.
+
+**Context.** boto3 exposes waiting as `client.get_waiter('bucket_exists').wait(
+Bucket=...)`: a named waiter object whose `.wait()` polls until the resource
+reaches the desired state, returning on success and raising `WaiterError` on a
+failure acceptor or on exhausting the attempt budget. D-0004 shipped the ENGINE —
+`WaiterConfig` (the `waiters-2.json` shape) + `wait(cfg, fn() -> Poll) ->
+WaiterOutcome` (the poll loop) — but left the boto3-recognizable surface (a bundled
+handle + the raise semantics + per-service tables) as the follow-up this ticket is.
+
+**Decision — the surface.** Two layers, both hand-written in `aws_core.waiters`
+(additive; the engine is untouched):
+
+1. A `Waiter` HANDLE — the boto3 `get_waiter(name)` analogue, the waiter twin of
+   aws.paginators' `Paginator`:
+   - `struct Waiter { WaiterConfig config; fn() -> Poll poll }` — a table entry
+     bundled with the poll closure that calls the operation. Constructor
+     `waiter(cfg, poll) -> Waiter`.
+   - `run(self) -> WaiterOutcome` — run the loop, return the outcome WITHOUT
+     raising (delegates to the engine's free `wait`; the function-typed field is
+     bound to a `fn(...)` local first, the I#163/D-0067 form).
+   - `wait_or_raise(self)` — boto3's `waiter.wait(...)`: return normally on a
+     success acceptor, else `raise` the formatted diagnostic. Named `wait_or_raise`
+     rather than `wait` because the module-level engine function already occupies
+     `wait` in this module's scope and an imported struct method cannot shadow the
+     imported free function (verified on the front end: `.wait()` on an imported
+     `Waiter` resolves to the free `wait` and fails ZAP6001; `wait_or_raise`
+     resolves cleanly).
+   - `succeeded/failed/timed_out(WaiterOutcome) -> bool` predicates for the
+     non-raising path, and `waiter_error_message(cfg, outcome) -> str` — boto3's
+     WaiterError text (waiter name, why it stopped, last HTTP status + attempt
+     count). Zap's `raise` carries a str message today (no typed payload —
+     aws.errors, zaplang-io/zap#22), so the raised value is that string, recovered
+     by a single `except ... as e:` exactly as aws.errors' raise bridge and
+     aws.batch_writer do.
+
+2. The CLIENT surface — a typed `wait_<waiter_name>(self, <op params>)` method per
+   waiter on each generated service client (e.g. S3 `wait_bucket_exists(self,
+   bucket)`), emitted by aws-codegen. Chosen over a stringly-typed
+   `get_waiter("bucket_exists")` registry because it matches the generated clients'
+   existing typed-operation surface and aws.paginators' `paginate_<op>` methods
+   (D-0011), gives per-waiter typed parameters, and removes runtime name lookup.
+   The `Waiter` handle remains the `get_waiter` analogue for callers who want the
+   object. boto3 exposes both; this picks the typed helper as the headline.
+
+**Config-sourcing seam (the single-repo boundary).** Identical to D-0011's: the
+engine + handle are generic and hand-written here; the per-service ACCEPTOR TABLES
+(one `WaiterConfig` per `waiters-2.json` entry) and the per-op POLL BINDINGS live in
+the aws-codegen repo and are supplied by the CALLER. This PR reads/emits no
+`waiters-2.json`, so it stays single-repo (aws). The real waiter fixtures in
+`tests/waiters.main.zap` (S3 BucketExists, DynamoDB TableExists, EC2
+InstanceRunning) stand in for the generated tables, and a mock `FakeS3` client with
+a `wait_bucket_exists` helper stands in for a generated client — exactly as the
+paginator fixtures stand in for `paginators-1.json`.
+
+**Verification.** Behavioral, without the Zap toolchain/Docker (Docker crashes the
+host; the only local `zap` is a front-end-only build with no LLVM codegen, so
+`zap run` is unavailable locally — CI is the authoritative compile+run gate).
+`tests/waiters.main.zap` gains a `== handle ==` section driving the handle through
+the `FakeS3` client over the scripted-poll seam: `wait_bucket_exists` returns
+without raising on success; `wait_or_raise` raises the pinned WaiterError message on
+a capped-budget timeout and on an EC2 failure acceptor (caught via `try/except as
+e`); and `run()` + the predicates report the right success/failure/timeout for each.
+The pinned `tests/expected/waiters.expected` lines were produced by extending the
+independent Python engine mirror in `tools/verify_vectors.py` (not hand-guessed);
+`python3 -I tools/verify_vectors.py` reports `ok waiters`. On the front end,
+`zap fmt` is clean and `zap ir tests/waiters.main.zap` type-checks through the
+materialized zenv (the handle, the method-vs-free-function resolution, and the
+`fn`-field closure) with no diagnostics. The additions are plain structs, methods,
+`try/except`, and a str `raise` — shapes already proven to codegen (aws.batch_writer
+raises a str; aws.paginators binds an `fn`-typed field and calls sibling methods;
+aws.typed_errors catches a raised str) — with no generators/`yield`, so the
+backend-only lowering class that bit D-0011 does not apply here.
+
+**Follow-up (aws-codegen).** Have the generator emit, per entry in a service's
+`waiters-2.json`:
+- the `WaiterConfig` literal — `name`, `delay`, `max_attempts`, and the ordered
+  `acceptors` list built with the `acceptor_status/error/path/path_all/path_any`
+  constructors (the `matcher`/`state`/`argument`/`expected` straight from the
+  model); plus
+- a `wait_<name>(self, <the operation's input params>)` method that builds the
+  polled operation's `Request` from the params, constructs the `fn() -> Poll`
+  closure — `lambda: waiters.send_poll(host, creds, req)` for JSON protocols, or
+  the per-protocol XML→`JsonValue` adapter's poll for query/rest-xml — and calls
+  `waiters.waiter(cfg, poll).wait_or_raise()` (and/or a `run_<name>` returning the
+  `WaiterOutcome` for the non-raising path). This collapses onto the shared handle
+  exactly as the paginator follow-up collapses onto `paginators.paginator`, and
+  supersedes the ad-hoc per-service waiter-table follow-up noted in D-0004. The
+  fixtures in `tests/waiters.main.zap` are the shape that generated output must
+  reproduce. Deferred: typed `WaiterError` payload fields (blocked on zap#22 typed
+  raise), and a `WaiterConfig`-level `operation` field (kept in the poll closure,
+  per D-0004).

@@ -9,6 +9,13 @@
 # DECISIONS.md D-0004); the real-AWS fixtures wired into tests/waiters.main.zap
 # stand in for that generated output and exercise every matcher kind.
 #
+# On top of the engine sits the ergonomic `Waiter` handle (the boto3
+# `get_waiter(name).wait(...)` surface): it bundles a `WaiterConfig` with its poll
+# closure and adds the boto3-faithful raise-on-failure/timeout semantics a
+# generated `wait_<name>(self, ...)` client helper calls via `wait_or_raise` (see
+# the handle section
+# near the end of this file and DECISIONS.md D-0012).
+#
 # It is bundled AFTER aws.core (the same import contract aws.retry uses), so every
 # type it leans on — `Response`, `AwsError`, `parse_error`, `is_success`,
 # `Request`, `Credentials`, `sign_request_now`, `send` — is already in scope.
@@ -386,3 +393,83 @@ def wait(WaiterConfig cfg, fn() -> Poll poll_fn) -> WaiterOutcome:
 def send_poll(str host, core.Credentials creds, core.Request req) -> Poll:
     auto resp = core.send(host, core.sign_request_now(creds, req))
     return Poll(response=resp, parsed=parse_body(resp))
+
+# ---------------------------------------------------------------------------
+# The ergonomic Waiter handle (boto3's get_waiter(name).wait(...))
+# ---------------------------------------------------------------------------
+#
+# Everything above is the generic ENGINE. This is the boto3-recognizable surface
+# over it: a `Waiter` bundles a `WaiterConfig` (one entry of a service's
+# `waiters-2.json` table) with the `fn() -> Poll` that polls the operation, so a
+# generated client can expose a clean per-waiter helper — the paginator analogue
+# of `paginate_<op>` (D-0011). The chosen client surface is a typed
+# `wait_<name>(self, ...)` method per waiter (see DECISIONS.md D-0012), emitted by
+# aws-codegen from `waiters-2.json`; each builds the config + poll closure and
+# delegates here, e.g. an S3 `BucketExists` helper:
+#
+#   def wait_bucket_exists(self, str bucket):
+#       auto cfg = _bucket_exists_waiter()          # generated table entry
+#       auto req = self._head_bucket_request(bucket)
+#       fn() -> waiters.Poll p = lambda: waiters.send_poll(self.host, self.creds, req)
+#       waiters.waiter(cfg, p).wait_or_raise()      # returns, or raises
+#
+# `run()` returns the raw `WaiterOutcome` for callers that branch on
+# `succeeded`/`failed`/`timed_out`; `wait_or_raise()` is the boto3-faithful form
+# that returns normally once the resource reaches the desired state and raises on a
+# failure acceptor or timeout (boto3's `waiter.wait()` / WaiterError). Zap's
+# `raise` carries a str message today (no typed payload — see aws.errors,
+# zaplang-io/zap#22), so the raised value is the formatted diagnostic below,
+# recovered by a single `except ... as e:`, exactly as aws.errors' raise bridge
+# and aws.batch_writer do.
+
+# A ready-to-run waiter: a config table entry plus the poll closure that calls the
+# operation. Mirrors aws.paginators' `Paginator` (config + fetch closure), but the
+# loop is a terminal poll rather than a `yield` iterator.
+struct Waiter:
+    WaiterConfig config
+    fn() -> Poll poll
+
+    # Run the waiter loop and return the outcome WITHOUT raising. The
+    # function-typed field is bound to a `fn(...)`-annotated local before use (the
+    # always-valid form aws.middleware / aws.paginators use, I#163/D-0067).
+    def run(self) -> WaiterOutcome:
+        fn() -> Poll p = self.poll
+        return wait(self.config, p)
+
+    # boto3's `waiter.wait(...)`: return normally once a success acceptor fires, or
+    # raise the formatted diagnostic on a failure acceptor or on exhausting
+    # `max_attempts` (timeout). Named `wait_or_raise`, not `wait`, because the
+    # module-level `wait` engine function occupies that name in this module's scope
+    # (an imported struct method cannot shadow the imported free function).
+    def wait_or_raise(self):
+        auto o = self.run()
+        if o.result != result_success():
+            raise waiter_error_message(self.config, o)
+
+# Construct a `Waiter` from a table entry and its poll closure — the boto3
+# `client.get_waiter('name')` analogue once the config and operation binding are
+# in hand. `waiter(cfg, poll).wait_or_raise()` is `get_waiter('name').wait(...)`.
+def waiter(WaiterConfig cfg, fn() -> Poll poll) -> Waiter:
+    return Waiter(config=cfg, poll=poll)
+
+# Outcome predicates, for callers that drive `run()` rather than the raising
+# `wait()`.
+def succeeded(WaiterOutcome o) -> bool:
+    return o.result == result_success()
+
+def failed(WaiterOutcome o) -> bool:
+    return o.result == result_failure()
+
+def timed_out(WaiterOutcome o) -> bool:
+    return o.result == result_timeout()
+
+# The message the raising `wait()` throws — boto3's WaiterError text: the waiter
+# name, why it stopped (a failure acceptor fired, or the attempt budget ran out),
+# and the last HTTP status + attempt count for diagnosis.
+def waiter_error_message(WaiterConfig cfg, WaiterOutcome o) -> str:
+    auto why = "an unexpected resource state was reached"
+    if o.result == result_timeout():
+        why = "max attempts exceeded"
+    auto tail = " (last-status=" + str(o.response.status)
+    tail = tail + ", attempts=" + str(o.attempts) + ")"
+    return "Waiter " + cfg.name + " failed: " + why + tail

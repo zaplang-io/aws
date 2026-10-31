@@ -478,16 +478,24 @@ def waiters():
         return RETRY
 
     def run(acceptors, max_attempts, script):
+        res, att, _status = run_full(acceptors, max_attempts, script)
+        return (res, att)
+
+    def run_full(acceptors, max_attempts, script):
+        # Like `run`, but also returns the last HTTP status seen (what the engine
+        # carries in WaiterOutcome.response for the error message).
         attempt = 0
+        last_status = 0
         while attempt < max_attempts:
             status, body = script[attempt] if attempt < len(script) else script[-1]
             attempt += 1
+            last_status = status
             st = evaluate(acceptors, status, body)
             if st == SUCCESS:
-                return (R_SUCCESS, attempt)
+                return (R_SUCCESS, attempt, last_status)
             if st == FAILURE:
-                return (R_FAILURE, attempt)
-        return (R_TIMEOUT, attempt)
+                return (R_FAILURE, attempt, last_status)
+        return (R_TIMEOUT, attempt, last_status)
 
     def st(state, matcher, argument, expected):
         return {
@@ -569,6 +577,34 @@ def waiters():
         [(200, ec2_body("pending", "pending")), (200, ec2_body("running", "running"))],
     ))
     out.append(show("instance-failed", ir, 40, [(200, ec2_body("terminated", "running"))]))
+
+    # The ergonomic Waiter handle: wait_or_raise() returns on success and raises
+    # the WaiterError message on a failure acceptor or timeout; run() + predicates
+    # for the non-raising path. Mirrors aws.waiters' Waiter / waiter_error_message.
+    def err_msg(name, res, att, last_status):
+        why = "an unexpected resource state was reached"
+        if res == R_TIMEOUT:
+            why = "max attempts exceeded"
+        return "Waiter %s failed: %s (last-status=%d, attempts=%d)" % (
+            name, why, last_status, att)
+
+    def preds(res):
+        return "succeeded=%s failed=%s timed_out=%s" % (
+            res == R_SUCCESS, res == R_FAILURE, res == R_TIMEOUT)
+
+    out.append("== handle ==")
+    # Success: wait_bucket_exists returns normally (no raise).
+    s_res, _s_att, _s_st = run_full(be, 20, [(404, ""), (200, "{}")])
+    out.append("wait_bucket_exists raised: " + str(s_res != R_SUCCESS))
+    # Timeout and failure raise the formatted message.
+    t_res, t_att, t_st = run_full(be, 2, [(404, "")])
+    out.append("caught: " + err_msg("BucketExists", t_res, t_att, t_st))
+    f_res, f_att, f_st = run_full(ir, 40, [(200, ec2_body("terminated", "running"))])
+    out.append("caught: " + err_msg("InstanceRunning", f_res, f_att, f_st))
+    # run() + predicates.
+    out.append("be " + preds(run_full(be, 20, [(404, ""), (200, "{}")])[0]))
+    out.append("to " + preds(run_full(be, 2, [(404, "")])[0]))
+    out.append("ir " + preds(run_full(ir, 40, [(200, ec2_body("terminated", "running"))])[0]))
 
     return "\n".join(out) + "\n"
 
