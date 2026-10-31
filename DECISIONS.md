@@ -1025,20 +1025,28 @@ zenv, including the generator methods and the function-typed-field call) emitted
 ZIR with no diagnostics. CI (`ghcr.io/zaplang-io/zap:latest`) is the authoritative
 compile+run gate.
 
-**Blocked on a toolchain codegen gap (zaplang-io/zap#451).** CI compiles cleanly
+**Blocked on a toolchain codegen gap (zaplang-io/zap#453).** CI compiles cleanly
 but runs the paginator test with EMPTY stdout — a whole-program lowering failure,
 not a runtime crash (not even the first `print` runs). The front-end accepts it
-(`zap ir` clean); only the LLVM backend path fails. Narrowed on the aws side: a
-function-typed field called from inside the generator frame and a tuple-of-structs
-return were both removed with no change, so the cause is the `yield` generator
-METHOD itself — defined in an imported package module and yielding a struct, a
-path the #429 goldens (single-file, int yields) and aws-codegen I#349's
-never-compiled generated paginators both leave untested. The decision stands as
-written (the engine is correct and the FE accepts it); the PR's CI is intentionally
-red pending the zap fix. If that fix slips, the proven D-0048
-`__iter__`/`__next__` + `raise StopIteration` protocol (the `stop_iter` run-golden)
-is a drop-in that lowers today with identical `for page in paginator.pages()`
-ergonomics and no API change — the documented fallback.
+(`zap ir` clean); only the LLVM backend path fails. First filed as zap#451
+("generator method in an imported module yielding a struct"); zap#451's fix +
+bisection goldens (zap PR #452) made the GENERIC case pass (a generator method in
+a module yielding a simple all-scalar struct), but the aws paginator STILL emits
+empty output. Narrowing against #452's now-passing golden isolates a distinct,
+narrower trigger — tracked as **zap#453**: the generator's struct carries a
+**function-typed field** (the caller-supplied fetch closure) and `self` (holding
+it) is spilled across the `yield`. (The closure is reached only through a plain
+sibling method, never called inside the generator frame, and the yielded
+`Response` is not kept live across the suspend — so the fn-field-in-`self` is the
+suspect, not a mid-frame closure call or a dict-bearing yield.) This shape is
+intrinsic to a lazy paginator that calls a client closure, so it cannot be worked
+around while keeping `yield`. The decision stands as written (the engine is
+correct and the FE accepts it); the PR's CI is intentionally red pending the
+zap#453 fix. The proven D-0048 `__iter__`/`__next__` + `raise StopIteration`
+protocol (the `stop_iter` run-golden; closure in a plain `__next__`, never a
+coroutine frame) is the validated drop-in fallback — identical
+`for page in paginator.pages()` ergonomics, no API change — if we later choose not
+to wait on zap#453.
 
 **Follow-up (aws-codegen).** aws-codegen I#349 already emits per-op `paginate_<op>`
 generator methods that inline this loop. The follow-up is to have the generator
