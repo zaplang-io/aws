@@ -20,3 +20,10 @@ bucket-not-exists: success attempts 1
 table-exists: success attempts 3
 instance-running: success attempts 2
 instance-failed: failure attempts 1
+== handle ==
+wait_bucket_exists raised: False
+caught: Waiter BucketExists failed: max attempts exceeded (last-status=404, attempts=2)
+caught: Waiter InstanceRunning failed: an unexpected resource state was reached (last-status=200, attempts=1)
+be succeeded=True failed=False timed_out=False
+to succeeded=False failed=False timed_out=True
+ir succeeded=False failed=True timed_out=False

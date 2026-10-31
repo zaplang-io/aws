@@ -11,7 +11,7 @@
 #                               # Endpoint + S3 addressing
 #   import aws_core.credentials # boto3-style credential provider chain
 #   import aws_core.retry       # standard retry mode (backoff + quota)
-#   import aws_core.waiters      # generic poll-until-state waiter engine
+#   import aws_core.waiters      # poll-until-state waiter engine + Waiter handle
 #   import aws_core.paginators  # generic lazy page iterator (get_paginator)
 #   import aws_core.middleware  # composable request/response interceptor chain
 #   import aws_core.binding     # protocol-agnostic HTTP binding layer

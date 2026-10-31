@@ -173,6 +173,44 @@ def show_cfg(waiters.WaiterConfig c) -> str:
     s = s + " acc " + str(len(c.acceptors))
     return s
 
+# --- the ergonomic Waiter handle over a mock service client ----------------
+#
+# A stand-in service client, the shape aws-codegen's generated clients take: its
+# `wait_<name>` helpers (boto3's surface, DECISIONS.md D-0012) bundle the generated
+# waiter table with a poll closure and delegate to `waiters.Waiter`. Here the poll
+# closure reads the scripted sequence (the same `fn() -> Poll` seam the live
+# `send_poll` fills), so the handle's success/raise/predicate behavior is asserted
+# without a network, end-to-end from a client helper.
+struct FakeS3:
+    Script script
+
+    # The generic seam the helpers share: bundle `cfg` with this client's poll
+    # closure into a `Waiter`. The scripted `Script` is bound to a local before the
+    # lambda captures it (the always-valid closure form the free `run` uses).
+    def waiter_for(self, waiters.WaiterConfig cfg) -> waiters.Waiter:
+        auto s = self.script
+        fn() -> waiters.Poll p = lambda: script_next(s)
+        return waiters.waiter(cfg, p)
+
+    # Run a waiter and return the outcome (non-raising), for predicate branching.
+    def run_for(self, waiters.WaiterConfig cfg) -> waiters.WaiterOutcome:
+        return self.waiter_for(cfg).run()
+
+    # boto3-faithful: return on success, raise the WaiterError message otherwise.
+    def wait_for(self, waiters.WaiterConfig cfg):
+        self.waiter_for(cfg).wait_or_raise()
+
+    # The named per-waiter helper aws-codegen emits: S3 BucketExists over the
+    # generated table (here `fast` so the test never sleeps).
+    def wait_bucket_exists(self):
+        self.wait_for(fast(s3_bucket_exists()))
+
+def preds(waiters.WaiterOutcome o) -> str:
+    auto s = "succeeded=" + str(waiters.succeeded(o))
+    s = s + " failed=" + str(waiters.failed(o))
+    s = s + " timed_out=" + str(waiters.timed_out(o))
+    return s
+
 def main():
     auto be = s3_bucket_exists()
     auto bne = s3_bucket_not_exists()
@@ -238,3 +276,37 @@ def main():
     # InstanceRunning: a terminated instance is a terminal failure (pathAny).
     auto l6 = run(fast(ir), new_script([poll(200, ec2_body("terminated", "running"))]))
     print(show("instance-failed", l6))
+
+    # The ergonomic Waiter handle (boto3's get_waiter(name).wait(...)) driven
+    # through a mock client's wait_<name> helpers.
+    print("== handle ==")
+    # Success: the named wait_bucket_exists helper returns normally (no raise)
+    # once the bucket appears.
+    auto c1 = FakeS3(script=new_script([poll(404, ""), poll(200, "{}")]))
+    auto raised1 = False
+    try:
+        c1.wait_bucket_exists()
+    except Exception as e:
+        raised1 = True
+    print("wait_bucket_exists raised: " + str(raised1))
+    # Timeout: wait() raises boto3's WaiterError message when the budget is spent.
+    auto c2 = FakeS3(script=new_script([poll(404, "")]))
+    try:
+        c2.wait_for(capped(be, 2))
+        print("timeout: no raise")
+    except Exception as e:
+        print("caught: " + e)
+    # Failure acceptor: a terminated instance raises while waiting for running.
+    auto c3 = FakeS3(script=new_script([poll(200, ec2_body("terminated", "running"))]))
+    try:
+        c3.wait_for(fast(ir))
+        print("failure: no raise")
+    except Exception as e:
+        print("caught: " + e)
+    # run() + predicates, for callers that branch instead of catching.
+    auto c4 = FakeS3(script=new_script([poll(404, ""), poll(200, "{}")]))
+    print("be " + preds(c4.run_for(fast(be))))
+    auto c5 = FakeS3(script=new_script([poll(404, "")]))
+    print("to " + preds(c5.run_for(capped(be, 2))))
+    auto c6 = FakeS3(script=new_script([poll(200, ec2_body("terminated", "running"))]))
+    print("ir " + preds(c6.run_for(fast(ir))))
