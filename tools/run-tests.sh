@@ -72,6 +72,8 @@ run_case cbor_codec
 run_case conditions
 run_case marshal
 run_case batch_writer
+run_case cloudfront_signing
+run_case ec2_resources
 
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2

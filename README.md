@@ -93,6 +93,8 @@ aws-core/src/marshal.zap       ERGONOMICS: native<->AttributeValue marshalling (
 aws-core/src/batch_writer.zap  ERGONOMICS: buffered DynamoDB BatchWriteItem writer (#435)
 aws-core/src/transfer.zap      ERGONOMICS: S3 managed multipart upload/download/copy (#438)
 aws-core/src/presign.zap       ERGONOMICS: S3 presigned URL + presigned POST (#439)
+aws-core/src/cloudfront.zap    ERGONOMICS: CloudFront signed URLs & signed cookies (#440)
+aws-core/src/ec2.zap           ERGONOMICS: EC2 resource layer + filter collections (#441)
 aws-core/src/dynamodb.zap      PARKED hand-written DynamoDB oracle (byte-diff fixture)
 aws-core/src/s3.zap            PARKED hand-written S3 oracle (byte-diff fixture)
 tests/transfer.main.zap        offline: S3 managed-transfer orchestration over a canned seam

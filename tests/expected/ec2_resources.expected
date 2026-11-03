@@ -1,0 +1,16 @@
+== instances (filtered, paged) ==
+items i-1:running i-2:running i-3:running
+tokens -,p2
+filters DescribeInstances Filter.1.Name=instance-state-name;Filter.1.Value.1=running
+== chained filters ==
+filters DescribeInstances Filter.1.Name=instance-state-name;Filter.1.Value.1=running;Filter.2.Name=instance-type;Filter.2.Value.1=t3.micro;Filter.2.Value.2=t3.small
+== security groups ==
+items sg-1:web sg-2:db
+== volumes ==
+items vol-1:available
+== lazy typed stream ==
+stream i-1 i-2 i-3
+== actions ==
+StartInstances i-1
+StopInstances i-2
+TerminateInstances i-3

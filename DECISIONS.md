@@ -1284,3 +1284,104 @@ additions are plain structs, straight-line signing, base64 + str concatenation,
 and default keyword args — shapes already proven to codegen. CI
 (`tools/run-tests.sh` under the toolchain image) is the authoritative compile+run
 gate.
+
+## D-0015 — CloudFront signed URLs & signed cookies ergonomics (2026-11-03)
+
+**Status.** Shipped in `aws-core/src/cloudfront.zap` (hand-written ergonomics,
+epic #432, zaplang-io/zap#440). Additive; nothing else changes. Follows the S3
+presign ergonomics (D-0014, aws#24).
+
+**Governing decisions.** D-0001 (generated clients are the product; boto3-style
+conveniences are hand-written on top, reusing aws-core primitives); D-0011 §2
+(aws-core is the shared runtime). This is the CloudFront analogue of the S3
+presign ergonomics (D-0014) — a signer object + `generate_presigned_url` /
+signed-cookie helpers — but for CloudFront private content, which is NOT SigV4.
+
+**What it is.** `botocore.signers.CloudFrontSigner` plus the signed-URL /
+signed-cookie conveniences for serving private content through a CloudFront
+distribution with a trusted key pair:
+- **Canned policy** — one Resource + a single `DateLessThan` (expiry). The signed
+  URL carries `Expires` / `Signature` / `Key-Pair-Id` (the policy is reconstructed
+  by CloudFront from the fixed template, never transmitted); the cookies carry
+  `CloudFront-Expires` / `-Signature` / `-Key-Pair-Id`.
+- **Custom policy** — explicit document that may also set `DateGreaterThan` (start
+  time) and `IpAddress` (CIDR), and a wildcard Resource. The full policy is
+  transmitted CloudFront-base64-encoded as the `Policy` param / `CloudFront-Policy`
+  cookie. The signature is over the EXACT policy bytes, so the byte sequence the
+  module emits IS the contract — pinned in `tests/cloudfront_signing.main.zap`
+  (`tests/expected/cloudfront_signing.expected`) and re-derived by the independent
+  oracle (`tools/verify_vectors.py: cloudfront_signing`, `ok cloudfront_signing`).
+- **CloudFront base64 variant** — standard padded base64 with `+`→`-`, `=`→`_`,
+  `/`→`~` (`cloudfront_b64` over `base64.encode`).
+
+**The RSA-SHA1 seam + a stdlib gap (language-first).** CloudFront signs
+`RSA-SHA1(key-pair-private-key, policy_bytes)`. The Zap crypto stdlib
+(zaplang-io/zap#105) ships SHA/HMAC/CSPRNG but **no RSA** — no PEM key loading and
+no RSA-PKCS1v1.5 signing. Rather than work around it silently, the RSA signature
+is taken as an INJECTED seam — a `fn(bytes) -> bytes` mapping the policy bytes to
+the raw signature bytes — exactly as aws.paginators takes a fetch closure and
+aws.waiters leaves the poll `operation` unmodeled. Everything else (policy
+construction, the base64 variant, URL/cookie assembly) is implemented and pinned;
+when a `crypto.rsa_sha1_sign(pem, data) -> bytes` primitive lands, the live signer
+is a one-line adapter with no change to this module. The offline test injects a
+DETERMINISTIC stand-in — the raw SHA-1 digest of the policy — which the oracle
+reproduces, so the policy bytes, the base64 variant, and the param placement are
+cross-checked without AWS or an RSA library. **Filed as a follow-up in
+zaplang-io/zap: add RSA-SHA1 signing (key load + PKCS1v1.5) to `crypto`** — until
+then the live signer must be supplied by the caller.
+
+**Method params are explicit (no defaults).** The optional custom-policy
+conditions are plain parameters (0 / "" omit them), not defaulted method args:
+defaulted parameters on struct METHODS miscompiled before zaplang-io/zap#481, so
+the repo convention keeps defaults on free functions only. `custom_policy` (a free
+function) is where any defaulting would live.
+
+## D-0016 — EC2 resource layer + filter collections ergonomics (2026-11-03)
+
+**Status.** Shipped in `aws-core/src/ec2.zap` (hand-written ergonomics, epic #432,
+zaplang-io/zap#441). Additive.
+
+**Governing decisions.** D-0001 (ergonomics ride on the generated client); D-0011
+§2; D-0011/D-0048 (the paginator engine, #436) — this is a direct consumer of it.
+The EC2 analogue of boto3's `ec2 = boto3.resource('ec2')` resource/collection
+layer.
+
+**What it is.** LAZY, FILTERABLE collections over the paginated `Describe*`
+operations:
+- `Ec2Resource.instances()` / `.security_groups()` / `.volumes()` return an
+  `Ec2Collection` — a `paginators.Paginator` (REUSE of #436): the engine threads
+  `NextToken` → `NextToken` across `Describe*` calls and yields each page's result
+  items lazily. No manual token threading at the call site.
+- `.filter(name, values)` returns a NEW collection (immutable, chainable, as in
+  boto3) and builds EC2's `Filter.<i>.Name` / `Filter.<i>.Value.<j>` request
+  params — the flat ec2-protocol encoding (aws.query), handed to the client as a
+  decoded dict (the same contract s3.zap uses).
+- Typed resource wrappers — `Ec2Instance` / `Ec2SecurityGroup` / `Ec2Volume` — are
+  thin PLAIN-DATA structs over the parsed response item (identifying scalars +
+  the full `raw` JsonValue). `.all_instances()` etc. materialize; a streaming
+  typed walk maps `as_instance` over `collection.build().items()` at the call site
+  (the proven lazy path — no new generator lowering).
+- Actions (`start_instance` / `stop_instance` / `terminate_instance`) call through
+  to the generated client via the action seam. They live on the resource handle
+  (not on the plain-data wrappers), so boto3's `instance.stop()` is
+  `ec2.stop_instance(instance.instance_id)` here — keeping resource objects
+  closure-free and within CI-exercised value shapes (the D-0013 transfer lesson:
+  avoid value shapes no merged CI test exercises).
+
+**The client SEAM (mirrors aws.batch_writer / aws.waiters / aws.paginators).** The
+generated EC2 client is injected as two closures — `describe(op, filter_params,
+token) -> Response` and `act(action, instance_id) -> Response` — so the module is
+independent of any one request builder and is driven by a mock client in
+`tests/ec2_resources.main.zap` (no live AWS). The describe body is the FLAT
+parsed-DOM projection the paginator reads (`{"Instances":[{"InstanceId":..,
+"State":..}, ...], "NextToken":..}`) — the same shape the waiter matchers run over
+(D-0004); the live adapter flattens EC2's Reservations→Instances nesting there.
+**No nested generic collections** (`list[list[T]]`) anywhere — zaplang-io/zap#625
+is not lowered — so filters are `list[Ec2Filter]` with a plain `list[str]` values
+field, and items flow as `list[JsonValue]` / `list[<typed>]`.
+
+**Follow-up (aws-codegen).** Emit the per-service resource/collection surface from
+the model: `Describe*`→collection bindings (result_key + NextToken), the typed
+resource shapes from the output members, and the XML→`JsonValue` describe adapter
+(the flattening projection) for the ec2/query protocol. The fixtures here are the
+shape generated output must reproduce.

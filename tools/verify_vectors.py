@@ -1222,6 +1222,94 @@ def cbor_codec():
     return "\n".join(out) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# CloudFront signed URLs & cookies (aws.cloudfront, zap#440)
+# ---------------------------------------------------------------------------
+#
+# Independent mirror of aws-core/src/cloudfront.zap: the canned/custom policy
+# templates, the CloudFront base64 variant (+/= -> -~_), and the URL/cookie param
+# assembly. CloudFront's signature is RSA-SHA1(key, policy_bytes), but the Zap
+# crypto stdlib has no RSA (the documented gap), so the Zap test injects a
+# DETERMINISTIC stand-in — the raw SHA-1 digest of the policy — through its signer
+# seam. This oracle reproduces the identical stand-in (hashlib.sha1(...).digest()),
+# so the policy bytes, the base64 variant, and the param placement are all
+# cross-checked; only the RSA math (absent on both sides) is out of scope.
+
+CF_KEY_PAIR_ID = "APKAEXAMPLE123456"
+CF_URL = "https://d111111abcdef8.cloudfront.net/private/content.jpg"
+CF_WILDCARD = "https://d111111abcdef8.cloudfront.net/private/*"
+CF_EXPIRES = 1700000000
+CF_DGT = 1699990000
+CF_SOURCE_IP = "203.0.113.0/24"
+
+
+def cf_canned_policy(resource, expires):
+    return ('{"Statement":[{"Resource":"' + resource +
+            '","Condition":{"DateLessThan":{"AWS:EpochTime":' + str(expires) +
+            '}}}]}')
+
+
+def cf_custom_policy(resource, dlt, dgt, ip):
+    cond = '"DateLessThan":{"AWS:EpochTime":' + str(dlt) + '}'
+    if dgt > 0:
+        cond += ',"DateGreaterThan":{"AWS:EpochTime":' + str(dgt) + '}'
+    if ip:
+        cond += ',"IpAddress":{"AWS:SourceIp":"' + ip + '"}'
+    return '{"Statement":[{"Resource":"' + resource + '","Condition":{' + cond + '}}]}'
+
+
+def cf_b64(data):
+    if isinstance(data, str):
+        data = data.encode()
+    s = _b64.b64encode(data).decode()
+    return s.replace("+", "-").replace("=", "_").replace("/", "~")
+
+
+def cf_sign(policy):
+    # raw SHA-1 digest stands in for the RSA-SHA1 signature bytes (the gap).
+    return cf_b64(hashlib.sha1(policy.encode()).digest())
+
+
+def cf_append(url, params):
+    sep = "&" if "?" in url else "?"
+    return url + sep + "&".join(k + "=" + v for k, v in params)
+
+
+def cloudfront_signing():
+    out = []
+    out.append("== canned policy ==")
+    out.append(cf_canned_policy(CF_URL, CF_EXPIRES))
+    out.append("== custom policy ==")
+    out.append(cf_custom_policy(CF_WILDCARD, CF_EXPIRES, CF_DGT, CF_SOURCE_IP))
+    out.append("== cloudfront-base64 ==")
+    out.append("gt=" + cf_b64(">>>"))
+    out.append("qm=" + cf_b64("???"))
+    out.append("pad=" + cf_b64("a"))
+
+    out.append("== canned url ==")
+    cpol = cf_canned_policy(CF_URL, CF_EXPIRES)
+    out.append(cf_append(CF_URL, [("Expires", str(CF_EXPIRES)),
+                                  ("Signature", cf_sign(cpol)),
+                                  ("Key-Pair-Id", CF_KEY_PAIR_ID)]))
+    out.append("== custom url ==")
+    xpol = cf_custom_policy(CF_URL, CF_EXPIRES, CF_DGT, CF_SOURCE_IP)
+    out.append(cf_append(CF_URL, [("Policy", cf_b64(xpol)),
+                                  ("Signature", cf_sign(xpol)),
+                                  ("Key-Pair-Id", CF_KEY_PAIR_ID)]))
+
+    out.append("== canned cookies ==")
+    ccpol = cf_canned_policy(CF_WILDCARD, CF_EXPIRES)
+    out.append("CloudFront-Expires=" + str(CF_EXPIRES))
+    out.append("CloudFront-Signature=" + cf_sign(ccpol))
+    out.append("CloudFront-Key-Pair-Id=" + CF_KEY_PAIR_ID)
+    out.append("== custom cookies ==")
+    xcpol = cf_custom_policy(CF_WILDCARD, CF_EXPIRES, CF_DGT, CF_SOURCE_IP)
+    out.append("CloudFront-Policy=" + cf_b64(xcpol))
+    out.append("CloudFront-Signature=" + cf_sign(xcpol))
+    out.append("CloudFront-Key-Pair-Id=" + CF_KEY_PAIR_ID)
+    return "\n".join(out) + "\n"
+
+
 def check(name, computed):
     path = os.path.join(EXP, name + ".expected")
     with open(path, "r", newline="") as fh:
@@ -1245,6 +1333,7 @@ def main():
     ok &= check("waiters", waiters())
     ok &= check("middleware", middleware())
     ok &= check("cbor_codec", cbor_codec())
+    ok &= check("cloudfront_signing", cloudfront_signing())
     if not ok:
         return 1
     print("vectors verified against independent oracle")
