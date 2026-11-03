@@ -1396,3 +1396,111 @@ the model: `Describe*`→collection bindings (result_key + NextToken), the typed
 resource shapes from the output members, and the XML→`JsonValue` describe adapter
 (the flattening projection) for the ec2/query protocol. The fixtures here are the
 shape generated output must reproduce.
+
+## D-0017 — SQS / SNS messaging conveniences ergonomics (2026-11-03)
+
+**Status.** Accepted. zaplang-io/zap#442 (epic #432). Modules
+`aws-core/src/sqs.zap` + `aws-core/src/sns.zap`, hand-written over the generated
+clients (D-0001). Tests `tests/sqs_messaging.main.zap`,
+`tests/sns_publish.main.zap`.
+
+**What it is.** boto3's `Queue` / `Message` / `Topic` resource equivalents:
+- `sqs.Queue(url, call)` — `send_message` (with attributes), `receive_messages`,
+  `delete_message`, `purge`. `Message` is a thin PLAIN-DATA wrapper
+  (`message_id` / `receipt_handle` / `body` / `md5_of_body` / `raw`), closure-free
+  so it can be yielded; boto3's `message.delete()` is
+  `queue.delete_message(msg.receipt_handle)` (the aws.ec2 action convention).
+- `sns.Topic(arn, call)` — `publish(message, subject, attrs)` returning a
+  `PublishResult`. SNS attribute params use the `MessageAttributes.entry.<i>.*`
+  wire shape (distinct from SQS's indexed `MessageAttribute.<i>.*`); attribute
+  values reuse `aws.sqs.MessageAttribute` so a caller models one type for both.
+
+**The validatable core — SQS message-attribute MD5.** SQS returns
+`MD5OfMessageBody` and `MD5OfMessageAttributes` on SendMessage, and the AWS SDKs
+validate them client-side to catch corruption. `body_md5` is a plain MD5 of the
+body; `attributes_md5` implements AWS's attribute-digest algorithm exactly: for
+each attribute in ascending NAME order, a 4-byte-BE-length-prefixed name and data
+type, then a transport-type byte (1 = String/Number value, 2 = Binary value) and
+the length-prefixed value, MD5 over the whole buffer. Raw bytes are assembled with
+`bytes([...])` and digested incrementally (`crypto.md5_new`/`update`/`hexdigest`);
+`verify_send` / `send_matches` are the SDK-style integrity check. Cross-checked by
+an independent hashlib mirror in `tools/verify_vectors.py` (`sqs`).
+
+**The client SEAM.** One injected closure `call(op, params) -> core.Response`
+(the aws.ec2 / aws.batch_writer pattern) — no signing or wire codec
+reimplemented. `params` is the decoded request-parameter dict the generated
+client percent-encodes; the response `body` is the flat parsed-DOM JSON the live
+adapter projects each response into (`{"MessageId":..,"MD5OfMessageBody":..}`,
+`{"Messages":[{...}]}`). Driven by a mock in tests; no live AWS. No nested
+generic collections (zaplang-io/zap#625) — attributes are a flat
+`list[MessageAttribute]`, messages flow as `list[JsonValue]` / `list[Message]`.
+
+**No language/stdlib gap.** `crypto.md5` + the incremental `md5_new`/`update`/
+`hexdigest` API and `bytes([...])` / bytes concat are all exercised by merged
+toolchain goldens (`crypto_hashes`, `crypto_streaming`, `bytes_basics`), so the
+digest ships without a seam — unlike the CloudFront RSA gap (D-0015).
+
+## D-0018 — IAM resource layer + policy collections ergonomics (2026-11-03)
+
+**Status.** Accepted. zaplang-io/zap#443 (epic #432). Module
+`aws-core/src/iam.zap`, hand-written over the generated client (D-0001). Test
+`tests/iam_resources.main.zap`.
+
+**What it is.** boto3's `iam = boto3.resource('iam')`:
+- `iam.users()` / `.roles()` / `.policies()` return an `IamCollection` — a
+  `paginators.Paginator` (REUSE of #436) — with typed `.all_users()` /
+  `.all_roles()` / `.all_policies()`. Wrappers (`IamUser` / `IamRole` /
+  `IamPolicy`) are thin PLAIN-DATA structs (identifying scalars + `raw`),
+  closure-free so they can be yielded (the aws.ec2 convention).
+- `iam.user(name)` / `iam.role(name)` return `User` / `Role` HANDLES (which carry
+  the seam) with `.policies()` (inline, ListUser/RolePolicies -> PolicyNames,
+  `.all_names()`) and `.attached_policies()` (managed, ListAttached* ->
+  AttachedPolicies, `.all_attached()`) sub-collections — boto3's
+  `user.policies.all()` / `user.attached_policies.all()`.
+
+**IAM Marker pagination needs no new engine mode.** IAM signals "more pages" with
+`IsTruncated` + a `Marker`. The live adapter (and the test mock) projects each
+response so `Marker` is present ONLY on a truncated page, which is exactly the
+"token absent => stop" contract the engine's string-token hook
+(`core.next_page_json`) already implements — so IAM reuses the same lazy walk
+aws.ec2 uses, with `Marker` in place of `NextToken`. (`"Marker"` is inlined at
+its one use site: module-level constants are not v1 surface — a top-level
+assignment is ZAP3016, zaplang-io/zap#459.)
+
+**The client SEAM.** One injected closure `list_op(op, params, marker) ->
+core.Response` (the aws.ec2 describe-seam shape). `params` carries the scoping
+`UserName` / `RoleName` for the per-user/role lists; the response `body` is the
+flat parsed-DOM JSON (`{"Users":[{...}],"Marker":".."}`, or `{"PolicyNames":
+["name",...]}` for inline lists). No nested generic collections (zap#625).
+
+## D-0019 — Glacier SHA-256 tree-hash upload helper ergonomics (2026-11-03)
+
+**Status.** Accepted. zaplang-io/zap#444 (epic #432). Module
+`aws-core/src/glacier.zap`, hand-written (D-0001). Test
+`tests/glacier_treehash.main.zap`.
+
+**What it is.** The SHA-256 TREE HASH Glacier requires on every archive upload
+(`x-amz-sha256-tree-hash`), which the low-level client cannot compute and callers
+otherwise hand-roll. Pure computation over the archive bytes — NO seam (unlike the
+resource-layer modules): split into 1 MiB leaves (`leaf_hashes`), SHA-256 each,
+reduce the binary tree pair by pair with an odd trailing node promoted unchanged
+(`reduce_level` / `tree_root`), emit lowercase hex (`tree_hash_hex`).
+`linear_hash_hex` is the plain whole-archive SHA-256 (`x-amz-content-sha256`).
+
+**Multipart.** `TreeHasher` accumulates leaves across parts: `add_part(part)`
+returns that part's own tree hash (for the UploadMultipartPart header) while
+remembering its leaves; `archive_tree_hash()` is the whole-archive tree hash for
+CompleteMultipartUpload (parts must be 1-MiB-aligned so leaf boundaries line up).
+The method delegates to a mutating free function, the aws.batch_writer
+self-mutation shape.
+
+**No language/stdlib gap.** The tree concatenates RAW 32-byte digests (not hex
+text) and re-hashes, which needs digest bytes: the incremental
+`crypto.sha256_new`/`update`/`digest` API supplies them, and the 1 MiB chunks use
+bytes slicing — both exercised by merged toolchain goldens (`crypto_streaming`,
+`bytes_sha256`, `bytes_basics`). Cross-checked by an independent hashlib mirror in
+`tools/verify_vectors.py` (`glacier`), including that a 1-MiB-aligned part split
+reproduces the whole-archive tree hash.
+
+**Follow-up (aws-codegen).** None model-derivable: the tree hash is an upload
+requirement, not an operation shape. It stays a hand-written ergonomics helper.

@@ -1,0 +1,18 @@
+== publish message only ==
+Message=hello there
+TopicArn=arn:aws:sns:us-east-1:123456789012:demo
+id=msg-sns-1
+== publish subject + attrs ==
+Message=full payload
+MessageAttributes.entry.1.Name=env
+MessageAttributes.entry.1.Value.DataType=String
+MessageAttributes.entry.1.Value.StringValue=prod
+MessageAttributes.entry.2.Name=priority
+MessageAttributes.entry.2.Value.DataType=Number
+MessageAttributes.entry.2.Value.StringValue=5
+MessageAttributes.entry.3.Name=blob
+MessageAttributes.entry.3.Value.BinaryValue=AQID
+MessageAttributes.entry.3.Value.DataType=Binary
+Subject=Daily
+TopicArn=arn:aws:sns:us-east-1:123456789012:demo
+id=msg-sns-2

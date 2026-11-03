@@ -1,0 +1,19 @@
+== body md5 ==
+982e00ffc10ba49378a8653ca8fecf47
+== attributes md5 string ==
+0c32cb5c844c01fbd5b6b434b52cf670
+== attributes md5 all ==
+2195c13c484662109d23dae5e769e44a
+== attributes md5 binary ==
+adb92a52846c4db587fcd4841bc987c8
+== send result ==
+id=msg-0001 body-md5-match=True attrs-md5-match=True
+== verify ==
+ok
+== tampered ==
+mismatch detected
+== receive ==
+m-1 rh-1 first
+m-2 rh-2 second
+== delete ==
+DeleteMessage rh-1

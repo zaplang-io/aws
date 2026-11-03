@@ -1,0 +1,16 @@
+== users (paged) ==
+items alice:AID1 bob:AID2 carol:AID3
+markers -,m2
+== roles ==
+items app:RID1
+== policies ==
+items ReadOnly:PID1
+== user inline policies ==
+names inline-a inline-b
+call ListUserPolicies UserName=bob
+== user attached policies ==
+attached AmazonS3ReadOnlyAccess=arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+call ListAttachedUserPolicies UserName=bob
+== role inline policies ==
+names role-inline
+call ListRolePolicies RoleName=app

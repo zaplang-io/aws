@@ -26,11 +26,16 @@
 #   import aws_core.presign     # S3 presigned URL + presigned POST (#432/#439)
 #   import aws_core.cloudfront  # CloudFront signed URLs & cookies (#432/#440)
 #   import aws_core.ec2         # EC2 resource layer + filter collections (#432/#441)
+#   import aws_core.sqs         # SQS Queue/Message + attribute MD5 (#432/#442)
+#   import aws_core.sns         # SNS Topic publish helpers (#432/#442)
+#   import aws_core.iam         # IAM resource layer + policy collections (#432/#443)
+#   import aws_core.glacier     # Glacier SHA-256 tree-hash upload helper (#432/#444)
 #
-# `conditions`, `marshal`, `batch_writer`, `transfer`, `presign`, `cloudfront`
-# and `ec2` are the hand-written ERGONOMICS modules (epic #432): boto3
-# resource-layer conveniences that ride on top of the generated clients, not
-# derivable from the models (D-0009, D-0010, D-0013, D-0014, D-0015, D-0016).
+# `conditions`, `marshal`, `batch_writer`, `transfer`, `presign`, `cloudfront`,
+# `ec2`, `sqs`, `sns`, `iam` and `glacier` are the hand-written ERGONOMICS
+# modules (epic #432): boto3 resource-layer conveniences that ride on top of the
+# generated clients, not derivable from the models (D-0009, D-0010, D-0013,
+# D-0014, D-0015, D-0016, D-0017, D-0018, D-0019).
 # `marshal` turns native Zap values into the DynamoDB
 # AttributeValue wire shape and back (boto3's TypeSerializer / TypeDeserializer),
 # and a condition's `ExpressionAttributeValues` flow through it; `transfer`
@@ -40,8 +45,13 @@
 # CloudFront signed URLs / signed cookies for private content (RSA-SHA1 over a
 # policy document — not SigV4); `ec2` is the boto3 resource/collection layer over
 # the generated EC2 client, reusing the paginator engine (#436) for lazy, filtered
-# `Describe*` walks. They are shipping surface, unlike the parked s3 / dynamodb
-# oracle fixtures below.
+# `Describe*` walks. `sqs` / `sns` are the messaging conveniences (Queue send /
+# receive / delete with the SQS message-attribute MD5 the SDKs validate, and SNS
+# Topic publish); `iam` is the boto3 resource layer with `.policies.all()`-style
+# policy collections (reusing the paginator engine for IAM's Marker pagination);
+# `glacier` computes the SHA-256 tree hash Glacier requires on archive uploads
+# (single-shot and multipart). They are shipping surface, unlike the parked
+# s3 / dynamodb oracle fixtures below.
 #
 # Zap v1 has no re-export form (D-0081 §3), so this root module exposes only the
 # package version; consumers import the submodule they need. The hand-written

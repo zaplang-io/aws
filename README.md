@@ -64,6 +64,12 @@ is [D-0011](https://github.com/zaplang-io/zap/blob/main/design/0011-aws-sdk.md).
   signer, boto3 `TransferConfig` defaults) and `presign`
   (`generate_presigned_url` for GET/PUT, `generate_presigned_post` policy+fields
   for browser uploads, over the aws-core query-parameter SigV4 presigner).
+  CloudFront — `cloudfront` (signed URLs & cookies). EC2 — `ec2` (filterable
+  resource collections). Messaging — `sqs` (`Queue` send/receive/delete with the
+  SQS message-attribute MD5 the SDKs validate, typed `Message`) and `sns`
+  (`Topic.publish`). IAM — `iam` (resource layer with `.policies.all()`-style
+  collections). Glacier — `glacier` (the SHA-256 tree hash archive uploads
+  require, single-shot and multipart).
 - **HTTPS transport** over the stdlib `tls` sockets: the signed HTTP/1.1 request
   is sent over a verified TLS connection and the reply is parsed into a
   `Response { status, headers, body }` (see FRICTION.md #5 on why the transport
@@ -95,6 +101,10 @@ aws-core/src/transfer.zap      ERGONOMICS: S3 managed multipart upload/download/
 aws-core/src/presign.zap       ERGONOMICS: S3 presigned URL + presigned POST (#439)
 aws-core/src/cloudfront.zap    ERGONOMICS: CloudFront signed URLs & signed cookies (#440)
 aws-core/src/ec2.zap           ERGONOMICS: EC2 resource layer + filter collections (#441)
+aws-core/src/sqs.zap           ERGONOMICS: SQS Queue/Message + message-attribute MD5 (#442)
+aws-core/src/sns.zap           ERGONOMICS: SNS Topic publish helpers (#442)
+aws-core/src/iam.zap           ERGONOMICS: IAM resource layer + policy collections (#443)
+aws-core/src/glacier.zap       ERGONOMICS: Glacier SHA-256 tree-hash upload helper (#444)
 aws-core/src/dynamodb.zap      PARKED hand-written DynamoDB oracle (byte-diff fixture)
 aws-core/src/s3.zap            PARKED hand-written S3 oracle (byte-diff fixture)
 tests/transfer.main.zap        offline: S3 managed-transfer orchestration over a canned seam
@@ -104,6 +114,10 @@ tests/service_signing.main.zap offline: full signed DynamoDB/S3 requests, pinned
 tests/endpoints_resolution.main.zap offline: endpoint resolution matrix, pinned
 tests/retry.main.zap           offline: retry classification + backoff, pinned
 tests/credentials_chain.main.zap offline: provider chain ordering + INI/JSON/process parsers
+tests/sqs_messaging.main.zap   offline: SQS send/receive/delete + message-attribute MD5, oracle-pinned
+tests/sns_publish.main.zap     offline: SNS Topic publish parameters, pinned
+tests/iam_resources.main.zap   offline: IAM resource collections + policy sub-collections
+tests/glacier_treehash.main.zap offline: Glacier SHA-256 tree hash (single-shot + multipart), oracle-pinned
 tests/expected/*.expected      pinned expected output
 examples/*.main.zap            runnable live-AWS examples (get-item, list, put-object)
 tools/run-tests.sh             materialize the zenv, run the offline suite, diff vs expected
