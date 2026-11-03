@@ -1,0 +1,38 @@
+### upload.single ###
+put b=bkt key=k.txt len=5
+-> put-etag
+### upload.multipart ###
+create b=bkt key=big.bin
+part 1 len=8
+part 2 len=8
+part 3 len=4
+complete parts=3 <CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>etag-1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>etag-2</ETag></Part><Part><PartNumber>3</PartNumber><ETag>etag-3</ETag></Part></CompleteMultipartUpload>
+-> done-etag
+### waves ###
+wave 1,2
+wave 3,4
+wave 5
+### upload.abort ###
+create b=bkt key=big.bin
+part 1 len=8
+abort mpu-1
+caught: upload aborted (multipart upload mpu-1): boom
+### download ###
+head b=bkt key=obj
+range bytes=0-7
+range bytes=8-15
+range bytes=16-19
+-> <0><8><16>
+### copy.single ###
+copy dst=db/dk src=sb/sk
+-> copy-etag
+### copy.multipart ###
+create b=db key=dk
+partcopy 1 bytes=0-7
+partcopy 2 bytes=8-15
+partcopy 3 bytes=16-19
+complete parts=3 <CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>cetag-1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>cetag-2</ETag></Part><Part><PartNumber>3</PartNumber><ETag>cetag-3</ETag></Part></CompleteMultipartUpload>
+-> done-etag
+### plan ###
+empty n=1 off=0 len=0
+maxparts chunk=10 parts=2

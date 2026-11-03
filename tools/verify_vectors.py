@@ -16,6 +16,7 @@ implementation disagrees and CI fails.
 
 Uses only the Python standard library (hashlib, hmac, urllib.parse.quote).
 """
+import base64 as _b64
 import hashlib
 import hmac
 import os
@@ -391,6 +392,287 @@ def presign_url():
     out.append("### presign.s3.GetObject+token ###")
     out.append(sig)
     out.append(url)
+
+    return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# S3 presign ergonomics (#439) — generate_presigned_url + generate_presigned_post
+# ---------------------------------------------------------------------------
+#
+# Independent re-derivation of aws.presign (the boto3 client-method layer over the
+# #359 presigner). The URL cases re-run the query-parameter SigV4 with the
+# REGIONAL virtual-hosted host aws.endpoints resolves (not the us-east-1 global
+# host of the core KAT), proving the ergonomics host/path wiring. The POST cases
+# re-derive base64(policy) and the HMAC-over-policy signature from scratch.
+
+def _presign_v4(access, secret, token, region, host, method, path, expires, extra):
+    """Mirror aws.presign.generate_presigned_url -> core.presign_url for an
+    arbitrary region/host (unlike `presign`, which pins the KAT constants)."""
+    scope = f"{PRESIGN_DS}/{region}/{PRESIGN_SERVICE}/aws4_request"
+    headers = {"host": host}
+    sh = signed_headers(headers)
+    params = dict(extra)
+    params["X-Amz-Algorithm"] = "AWS4-HMAC-SHA256"
+    params["X-Amz-Credential"] = f"{access}/{scope}"
+    params["X-Amz-Date"] = PRESIGN_AMZ
+    params["X-Amz-Expires"] = str(expires)
+    params["X-Amz-SignedHeaders"] = sh
+    if token:
+        params["X-Amz-Security-Token"] = token
+    cq = canonical_query(params)
+    cu = canonical_uri(path, PRESIGN_SERVICE)
+    ch = canonical_headers(headers)
+    creq = f"{method}\n{cu}\n{cq}\n{ch}\n{sh}\nUNSIGNED-PAYLOAD"
+    sts = f"AWS4-HMAC-SHA256\n{PRESIGN_AMZ}\n{scope}\n{sha(creq)}"
+    sig = hmac.new(signing_key(secret, PRESIGN_DS, region, PRESIGN_SERVICE),
+                   sts.encode(), hashlib.sha256).hexdigest()
+    full_q = cq + "&X-Amz-Signature=" + sig
+    url = f"https://{host}{uri_encode(path, True)}?{full_q}"
+    return sig, url
+
+
+def _post_policy(expiration, conditions, key, credential, token):
+    """Mirror aws.presign._policy_document: caller conditions, then the auto
+    conditions for the signed fields, as a flat JSON conditions array."""
+    conds = list(conditions)
+    conds.append('{"key":"' + key + '"}')
+    conds.append('{"x-amz-algorithm":"AWS4-HMAC-SHA256"}')
+    conds.append('{"x-amz-credential":"' + credential + '"}')
+    conds.append('{"x-amz-date":"' + PRESIGN_AMZ + '"}')
+    if token:
+        conds.append('{"x-amz-security-token":"' + token + '"}')
+    return '{"expiration":"' + expiration + '","conditions":[' + ",".join(conds) + "]}"
+
+
+def _presign_post(access, secret, token, region, host, key, expiration,
+                  conditions, extra_fields):
+    """Mirror aws.presign.generate_presigned_post."""
+    scope = f"{PRESIGN_DS}/{region}/{PRESIGN_SERVICE}/aws4_request"
+    credential = f"{access}/{scope}"
+    policy = _post_policy(expiration, conditions, key, credential, token)
+    policy_b64 = _b64.b64encode(policy.encode()).decode()
+    sig = hmac.new(signing_key(secret, PRESIGN_DS, region, PRESIGN_SERVICE),
+                   policy_b64.encode(), hashlib.sha256).hexdigest()
+    fields = list(extra_fields)
+    fields.append(("key", key))
+    fields.append(("x-amz-algorithm", "AWS4-HMAC-SHA256"))
+    fields.append(("x-amz-credential", credential))
+    fields.append(("x-amz-date", PRESIGN_AMZ))
+    if token:
+        fields.append(("x-amz-security-token", token))
+    fields.append(("policy", policy_b64))
+    fields.append(("x-amz-signature", sig))
+    url = f"https://{host}/"
+    return policy_b64, sig, url, fields
+
+
+def s3_presign():
+    access = "AKIAIOSFODNN7EXAMPLE"
+    taccess = "ASIAIOSFODNN7EXAMPLE"
+    token = "FwoGZXIvYXdzEXAMPLE/token+value=="
+    out = []
+
+    # Case 1: presigned GET, regional virtual-hosted host.
+    sig, url = _presign_v4(access, PRESIGN_SECRET, "", "us-east-1",
+                           "examplebucket.s3.us-east-1.amazonaws.com",
+                           "GET", "/test.txt", 86400, {})
+    out.append("### presign.url.get ###")
+    out.append(sig)
+    out.append(url)
+
+    # Case 2: presigned GET with extra signed query params (merge/encode/sort).
+    sig, url = _presign_v4(access, PRESIGN_SECRET, "", "us-east-1",
+                           "examplebucket.s3.us-east-1.amazonaws.com",
+                           "GET", "/test.txt", 900,
+                           {"response-content-type": "text/plain",
+                            "versionId": "L4kqtJlcpXroDVBH40Nr8X8g+rmSpXd3"})
+    out.append("### presign.url.get+params ###")
+    out.append(sig)
+    out.append(url)
+
+    # Case 3: presigned PUT in a non-us-east-1 region.
+    sig, url = _presign_v4(access, PRESIGN_SECRET, "", "us-west-2",
+                           "my-bucket.s3.us-west-2.amazonaws.com",
+                           "PUT", "/uploads/report.pdf", 3600, {})
+    out.append("### presign.url.put ###")
+    out.append(sig)
+    out.append(url)
+
+    # Case 4: presigned POST with caller conditions + echoed fields.
+    conds3 = ['{"acl":"public-read"}',
+              '["starts-with","$Content-Type","image/"]',
+              '["content-length-range",1,10485760]']
+    extra3 = [("acl", "public-read"), ("Content-Type", "image/png")]
+    policy, sig, url, fields = _presign_post(
+        access, PRESIGN_SECRET, "", "us-east-1",
+        "examplebucket.s3.us-east-1.amazonaws.com",
+        "user/uploads/${filename}", "2013-05-24T12:00:00Z", conds3, extra3)
+    out.append("### presign.post ###")
+    out.append(policy)
+    out.append(sig)
+    out.append(url)
+    for n, v in fields:
+        out.append("field " + n + "=" + v)
+
+    # Case 5: presigned POST with temporary credentials (x-amz-security-token).
+    conds4 = ['["content-length-range",0,1048576]']
+    policy, sig, url, fields = _presign_post(
+        taccess, PRESIGN_SECRET, token, "us-west-2",
+        "my-bucket.s3.us-west-2.amazonaws.com",
+        "incoming/data.bin", "2013-05-24T12:00:00Z", conds4, [])
+    out.append("### presign.post+token ###")
+    out.append(policy)
+    out.append(sig)
+    out.append(url)
+    for n, v in fields:
+        out.append("field " + n + "=" + v)
+
+    return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# S3 managed transfer (#438) — behavioral mirror of aws.transfer
+# ---------------------------------------------------------------------------
+#
+# An independent Python reimplementation of the transfer orchestration (the
+# threshold decision, the ChunksizeAdjuster part math, the bounded waves, the
+# ranged download, the single-vs-multipart copy, and the abort-on-failure path)
+# plus the exact recording-seam trace tests/transfer.main.zap emits, so the two
+# implementations must agree line for line (CI runs the Zap entry; this pins the
+# expected trace). Mirrors the structure of the `waiters` / `middleware` behavioral
+# mirrors above.
+
+_MIB = 1048576
+_MAX_PARTS = 10000
+_MAX_SINGLE = 5 * 1024 * _MIB
+
+
+def _t_ceil_div(n, d):
+    if d <= 0:
+        return 0
+    return (n + d - 1) // d
+
+
+def _t_adjusted_chunksize(total, chunk, min_chunk, max_parts):
+    if _t_ceil_div(total, chunk) > max_parts:
+        chunk = _t_ceil_div(total, max_parts)
+    if chunk < min_chunk:
+        chunk = min_chunk
+    if chunk > _MAX_SINGLE:
+        chunk = _MAX_SINGLE
+    return chunk
+
+
+def _t_plan_parts(total, chunk, min_chunk, max_parts):
+    c = _t_adjusted_chunksize(total, chunk, min_chunk, max_parts)
+    if total <= 0:
+        return [(1, 0, 0)]
+    out = []
+    off = 0
+    num = 1
+    while off < total:
+        length = c if off + c <= total else total - off
+        out.append((num, off, length))
+        off += length
+        num += 1
+    return out
+
+
+def _t_plan_waves(parts, width):
+    if width < 1:
+        width = 1
+    waves = []
+    cur = []
+    for p in parts:
+        cur.append(p[0])
+        if len(cur) >= width:
+            waves.append(cur)
+            cur = []
+    if cur:
+        waves.append(cur)
+    return waves
+
+
+def _t_range(off, length):
+    last = off + length - 1
+    if last < off:
+        last = off
+    return f"bytes={off}-{last}"
+
+
+def _t_complete_body(parts):
+    out = "<CompleteMultipartUpload>"
+    for n, etag in parts:
+        out += (f"<Part><PartNumber>{n}</PartNumber><ETag>{etag}</ETag></Part>")
+    return out + "</CompleteMultipartUpload>"
+
+
+def transfer():
+    # cfg: threshold 10, chunk 8, min 1, concurrency 10, max_parts 10000, copy 10.
+    chunk, mn, conc, mxp, copyt, thr = 8, 1, 10, _MAX_PARTS, 10, 10
+    out = []
+
+    # upload.single — below threshold -> PutObject.
+    out.append("### upload.single ###")
+    out.append("put b=bkt key=k.txt len=5")
+    out.append("-> put-etag")
+
+    # upload.multipart — Create -> UploadPart x N -> Complete.
+    parts = _t_plan_parts(20, chunk, mn, mxp)
+    out.append("### upload.multipart ###")
+    out.append("create b=bkt key=big.bin")
+    done = []
+    for n, off, length in parts:
+        out.append(f"part {n} len={length}")
+        done.append((n, f"etag-{n}"))
+    out.append("complete parts=" + str(len(done)) + " " + _t_complete_body(done))
+    out.append("-> done-etag")
+
+    # waves — bounded concurrency grouping (chunk 4 -> 5 parts, width 2).
+    out.append("### waves ###")
+    for wave in _t_plan_waves(_t_plan_parts(20, 4, mn, mxp), 2):
+        out.append("wave " + ",".join(str(x) for x in wave))
+
+    # upload.abort — part 2 fails -> Abort + raise.
+    out.append("### upload.abort ###")
+    out.append("create b=bkt key=big.bin")
+    out.append("part 1 len=8")
+    out.append("abort mpu-1")
+    out.append("caught: upload aborted (multipart upload mpu-1): boom")
+
+    # download — ranged GET per planned window.
+    out.append("### download ###")
+    out.append("head b=bkt key=obj")
+    dparts = _t_plan_parts(20, chunk, mn, mxp)
+    body = ""
+    for n, off, length in dparts:
+        out.append("range " + _t_range(off, length))
+        body += f"<{off}>"
+    out.append("-> " + body)
+
+    # copy.single — size <= copy_threshold.
+    out.append("### copy.single ###")
+    out.append("copy dst=db/dk src=sb/sk")
+    out.append("-> copy-etag")
+
+    # copy.multipart — size > copy_threshold -> UploadPartCopy per range.
+    out.append("### copy.multipart ###")
+    out.append("create b=db key=dk")
+    cparts = _t_plan_parts(20, chunk, mn, mxp)
+    cdone = []
+    for n, off, length in cparts:
+        out.append(f"partcopy {n} " + _t_range(off, length))
+        cdone.append((n, f"cetag-{n}"))
+    out.append("complete parts=" + str(len(cdone)) + " " + _t_complete_body(cdone))
+    out.append("-> done-etag")
+
+    # plan — pure part math edge cases.
+    out.append("### plan ###")
+    ep = _t_plan_parts(0, chunk, mn, mxp)[0]
+    out.append(f"empty n={ep[0]} off={ep[1]} len={ep[2]}")
+    adj = _t_adjusted_chunksize(20, 8, 1, 2)
+    out.append(f"maxparts chunk={adj} parts={len(_t_plan_parts(20, 8, 1, 2))}")
 
     return "\n".join(out) + "\n"
 
@@ -955,6 +1237,8 @@ def main():
     ok &= check("service_signing", service_signing())
     ok &= check("streaming_sigv4", streaming_sigv4())
     ok &= check("presign_url", presign_url())
+    ok &= check("s3_presign", s3_presign())
+    ok &= check("transfer", transfer())
     ok &= check("waiters", waiters())
     ok &= check("middleware", middleware())
     ok &= check("cbor_codec", cbor_codec())

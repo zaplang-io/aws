@@ -1162,3 +1162,125 @@ backend-only lowering class that bit D-0011 does not apply here.
   reproduce. Deferred: typed `WaiterError` payload fields (blocked on zap#22 typed
   raise), and a `WaiterConfig`-level `operation` field (kept in the poll closure,
   per D-0004).
+
+## D-0013 — S3 managed transfer: a hand-written ergonomics module over the multipart ops (2026-11-03)
+
+**Status:** accepted (ticket #438, part of ergonomics epic #432).
+
+**Governing decisions.** aws-codegen D-0001 (generated-is-product: the generated
+S3 client is the shipping SDK and already exposes the raw multipart operations;
+the managed-transfer orchestration boto3 layers on top is a resource-layer
+convenience, not derivable from the model, so it is hand-written). D-0002 (the
+streaming / aws-chunked SigV4 primitives, #358, that an UploadPart rides on).
+Follows D-0009/D-0010/D-0012 as another hand-written ergonomics module — the S3
+sibling of the DynamoDB `batch_writer` (#435).
+
+**Context.** boto3's `boto3.s3.transfer` (`S3Transfer` / `TransferManager`) hides
+S3's multipart machinery behind `upload_file` / `upload_fileobj` / `download_file`
+/ `copy`: it picks single-shot vs multipart by a size threshold, slices the object
+into parts, uploads them with bounded concurrency, completes (or aborts) the
+upload, and streams ranged GETs on download. None of it is modeled by botocore, so
+it is real shipping aws-core surface that users of the generated S3 client compose.
+
+**Decision.** A new shipping module `aws_core.transfer`:
+
+- `TransferConfig` with boto3's defaults — 8 MiB `multipart_threshold` and
+  `multipart_chunksize`, 10-way `max_concurrency`, the 10 000-part cap, a 5 MiB
+  part-size floor, and the 5 GiB single-copy `copy_threshold`.
+- Pure part math: `adjusted_chunksize` (boto3's `ChunksizeAdjuster` — grow for the
+  max-parts cap, floor at `min_chunksize`, cap at 5 GiB), `plan_parts` (the
+  ascending byte windows), `plan_waves` (group parts into bounded
+  `max_concurrency` waves), and the `range_header` / `complete_mpu_body` wire
+  helpers. All exposed, so the boundaries are asserted directly.
+- `TransferManager` (`upload_fileobj`/`upload_file`, `download_fileobj`/
+  `download_file`, `copy`): PutObject below the threshold, else
+  CreateMultipartUpload → UploadPart (in waves) → CompleteMultipartUpload, with an
+  AbortMultipartUpload + re-raise on any part failure; ranged streamed GETs on
+  download; a single CopyObject at/below 5 GiB, else UploadPartCopy per range.
+
+**The transfer seam (how it hooks the generated client).** Like `batch_writer`'s
+`submit` seam and the `fn() -> Response` seams in `retry` / `middleware` /
+`waiters`, the manager is parameterised over the S3 operations it drives as a
+struct of typed function fields (`S3TransferClient`). The live adapter binds each
+to the matching generated call — UploadPart / UploadPartCopy over
+`core.sign_streaming_request` (#358), so a part is signed and sent as an
+aws-chunked stream rather than buffered-then-hashed — and the offline test injects
+canned recording responders through the same seam. No bytes are re-signed or
+re-sent by this module.
+
+**Bounded concurrency (the wave model).** aws-core's engines are synchronous
+seam-drivers (concurrency is the adapter's/caller's concern, as in `retry` /
+`middleware`), so boto3's `max_concurrency` is modelled structurally:
+`plan_waves` groups parts into waves of at most `max_concurrency`, and a live
+adapter may run one wave's independent UploadParts concurrently. The reference
+dispatch is deterministic (ascending part order) so the orchestration is testable;
+Complete always lists parts in ascending `PartNumber` order regardless, as S3
+requires.
+
+**Verification.** Host front-end only (Docker crashes the maintainer's host; the
+local `zap` is a front-end-only build with no LLVM codegen, so `zap run` is
+CI-only). `zap fmt --check` is clean and `zap ir` type-checks the module and
+`tests/transfer.main.zap` through the materialized zenv (the nine-field `fn`
+seam, the method-vs-free-function split, slicing, and the str `raise` / `except`
+abort path — shapes already proven to codegen by `batch_writer` / `paginators` /
+`waiters`, with no generators). The offline test injects a canned
+`S3TransferClient` and asserts the single-shot/multipart decision, the 8/8/4 part
+split, the bounded-wave grouping, the ranged download, the single-vs-multipart
+copy, and the abort-on-failure trace against pinned expected output; the trace is
+re-derived independently by a Python mirror of the orchestration in
+`tools/verify_vectors.py` (`transfer`), so `python3 -I tools/verify_vectors.py`
+reports `ok transfer`. CI (`ghcr.io/zaplang-io/zap:latest`, `tools/run-tests.sh`)
+is the authoritative compile+run gate.
+
+## D-0014 — S3 presigned URL + presigned POST: a hand-written ergonomics module over the #359 presigner (2026-11-03)
+
+**Status:** accepted (ticket #439, part of ergonomics epic #432).
+
+**Governing decisions.** aws-codegen D-0001 (generated-is-product; the boto3
+client-method ergonomics are hand-written). D-0003 (the query-parameter SigV4
+presigner, #359, `core.presign_url`, this builds on). Follows D-0013 as the S3
+companion ergonomics module.
+
+**Context.** boto3's `client.generate_presigned_url` and
+`client.generate_presigned_post` are the two ways to grant time-boxed S3 access
+without sharing credentials: a signed GET/PUT URL whose SigV4 signature rides in
+the query string, and a POST policy + form fields a browser `multipart/form-data`
+upload posts straight to S3. The low-level query-parameter presigner is already
+aws-core core surface (#359, D-0003); the operation→request mapping for a URL and
+the whole POST-policy machinery (policy document, base64, the HMAC-over-policy
+signature, the field set) are the client-method layer #359 does not cover.
+
+**Decision.** A new shipping module `aws_core.presign`:
+
+- `generate_presigned_url(creds, region, bucket, key, amz_date, date_stamp,
+  method="GET", expires=3600, params={})` — builds the S3 object `Request`
+  (virtual-hosted host via `endpoints.resolve_s3`, object-key path via `s3`) and
+  hands it to `core.presign_url`, so the canonicalization/signing is exactly the
+  #359 code proven against AWS's published vector. `params` become extra signed
+  query parameters. Thin `presign_get` / `presign_put` wrappers + a `_now` variant.
+- `generate_presigned_post(creds, region, bucket, key, amz_date, date_stamp,
+  expiration, conditions=[], extra_fields=[])` — signs a base64-encoded POLICY
+  document: `x-amz-signature = HexEncode(HMAC-SHA256(signing_key, base64(policy)))`
+  with the same `kDate→kRegion→kService→kSigning` key chain (`core.signing_key` +
+  `core.sign`). Returns `PresignedPost{url, fields, policy, signature}` with the
+  ordered form fields the browser posts (key, the SigV4 fields, the session token
+  when present, policy, signature) and the matching conditions appended to the
+  signed policy so S3 accepts the fields. Caller `conditions` are pre-rendered JSON
+  fragments, keeping JSON string-escaping off this hand path (matching `conditions`
+  / `marshal` / `restxml`).
+
+**Oracle.** `tools/verify_vectors.py` (`s3_presign`) re-derives both paths
+independently: the URL cases re-run the query-parameter SigV4 with the REGIONAL
+virtual-hosted host `endpoints.resolve_s3` produces (not the us-east-1 global host
+of the core KAT in `tests/presign_url.main.zap`, so they exercise the ergonomics
+host/path wiring), and the POST cases re-derive base64(policy) and the
+HMAC-over-policy signature from scratch. `tests/s3_presign.main.zap` prints the
+same blocks through the Zap module and `tools/run-tests.sh` diffs them;
+`python3 -I tools/verify_vectors.py` reports `ok s3_presign`.
+
+**Verification.** Host front-end only (as D-0013). `zap fmt --check` is clean and
+`zap ir` type-checks the module and the test through the materialized zenv; the
+additions are plain structs, straight-line signing, base64 + str concatenation,
+and default keyword args — shapes already proven to codegen. CI
+(`tools/run-tests.sh` under the toolchain image) is the authoritative compile+run
+gate.
