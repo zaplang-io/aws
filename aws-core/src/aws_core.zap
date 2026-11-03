@@ -21,14 +21,20 @@
 #   import aws_core.dynamic     # opt-in dynamic call() escape hatch (#365)
 #   import aws_core.conditions  # DynamoDB Key/Attr condition builder (#432/#433)
 #   import aws_core.marshal     # native<->AttributeValue marshalling (#432/#434)
+#   import aws_core.batch_writer # buffered DynamoDB BatchWriteItem writer (#435)
+#   import aws_core.transfer    # S3 managed multipart transfer (#432/#438)
+#   import aws_core.presign     # S3 presigned URL + presigned POST (#432/#439)
 #
-# `conditions` and `marshal` are the hand-written ERGONOMICS modules (epic #432):
-# boto3 resource-layer conveniences that ride on top of the generated DynamoDB
-# client, not derivable from the models (D-0009, D-0010). `marshal` turns native
-# Zap values into the DynamoDB AttributeValue wire shape and back (boto3's
-# TypeSerializer / TypeDeserializer), and a condition's `ExpressionAttributeValues`
-# flow through it. They are shipping surface, unlike the parked s3 / dynamodb
-# oracle fixtures below.
+# `conditions`, `marshal`, `batch_writer`, `transfer` and `presign` are the
+# hand-written ERGONOMICS modules (epic #432): boto3 resource-layer conveniences
+# that ride on top of the generated clients, not derivable from the models (D-0009,
+# D-0010, D-0013, D-0014). `marshal` turns native Zap values into the DynamoDB
+# AttributeValue wire shape and back (boto3's TypeSerializer / TypeDeserializer),
+# and a condition's `ExpressionAttributeValues` flow through it; `transfer`
+# orchestrates S3 multipart upload/download/copy over the generated S3 client and
+# the aws-core streaming signer (#358); `presign` mints S3 presigned URLs and POST
+# policies over the aws-core query-parameter signer (#359). They are shipping
+# surface, unlike the parked s3 / dynamodb oracle fixtures below.
 #
 # Zap v1 has no re-export form (D-0081 §3), so this root module exposes only the
 # package version; consumers import the submodule they need. The hand-written

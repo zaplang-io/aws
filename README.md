@@ -56,6 +56,14 @@ is [D-0011](https://github.com/zaplang-io/zap/blob/main/design/0011-aws-sdk.md).
   including the `x-amz-content-sha256` / `UNSIGNED-PAYLOAD` quirk. `put_object`
   takes `content_type=` and a `metadata={...}` dict (signed `x-amz-meta-*`);
   `list_objects_v2` takes `prefix=` / `max_keys=`.
+- **Ergonomics layer** (epic #432): boto3 resource-layer conveniences hand-written
+  on top of the generated clients (D-0001). DynamoDB — `conditions` (`Key`/`Attr`
+  expression builder), `marshal` (native↔AttributeValue), `batch_writer`
+  (buffered `BatchWriteItem`). S3 — `transfer` (`upload_file`/`upload_fileobj`,
+  `download_file`, `copy` with automatic multipart over the aws-core streaming
+  signer, boto3 `TransferConfig` defaults) and `presign`
+  (`generate_presigned_url` for GET/PUT, `generate_presigned_post` policy+fields
+  for browser uploads, over the aws-core query-parameter SigV4 presigner).
 - **HTTPS transport** over the stdlib `tls` sockets: the signed HTTP/1.1 request
   is sent over a verified TLS connection and the reply is parsed into a
   `Response { status, headers, body }` (see FRICTION.md #5 on why the transport
@@ -80,8 +88,15 @@ aws-core/src/awsjson.zap       awsJson 1.0/1.1 codec
 aws-core/src/restjson.zap      rest-json codec
 aws-core/src/restxml.zap       rest-xml codec
 aws-core/src/dynamic.zap       opt-in dynamic call() escape hatch for uncovered ops (#365)
+aws-core/src/conditions.zap    ERGONOMICS: DynamoDB Key/Attr condition builder (#433)
+aws-core/src/marshal.zap       ERGONOMICS: native<->AttributeValue marshalling (#434)
+aws-core/src/batch_writer.zap  ERGONOMICS: buffered DynamoDB BatchWriteItem writer (#435)
+aws-core/src/transfer.zap      ERGONOMICS: S3 managed multipart upload/download/copy (#438)
+aws-core/src/presign.zap       ERGONOMICS: S3 presigned URL + presigned POST (#439)
 aws-core/src/dynamodb.zap      PARKED hand-written DynamoDB oracle (byte-diff fixture)
 aws-core/src/s3.zap            PARKED hand-written S3 oracle (byte-diff fixture)
+tests/transfer.main.zap        offline: S3 managed-transfer orchestration over a canned seam
+tests/s3_presign.main.zap      offline: S3 presigned URL + POST, oracle-pinned
 tests/sigv4_vectors.main.zap   offline SigV4 conformance vs AWS's published vectors
 tests/service_signing.main.zap offline: full signed DynamoDB/S3 requests, pinned
 tests/endpoints_resolution.main.zap offline: endpoint resolution matrix, pinned

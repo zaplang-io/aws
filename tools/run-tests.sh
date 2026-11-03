@@ -54,6 +54,8 @@ run_case sigv4_vectors
 run_case service_signing
 run_case streaming_sigv4
 run_case presign_url
+run_case s3_presign
+run_case transfer
 run_case awsjson_codec
 run_case retry
 run_case waiters
