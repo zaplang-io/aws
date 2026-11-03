@@ -1330,6 +1330,17 @@ cross-checked without AWS or an RSA library. **Filed as a follow-up in
 zaplang-io/zap: add RSA-SHA1 signing (key load + PKCS1v1.5) to `crypto`** — until
 then the live signer must be supplied by the caller.
 
+**UPDATE (2026-11-03): the gap is closed.** zaplang-io/zap#628 shipped in #629
+(`crypto.rsa_sha1_sign` / `rsa_sha256_sign`, PEM PKCS#1 or PKCS#8, raw PKCS#1 v1.5
+bytes) and is in the `:latest` toolchain image. `cloudfront_signer_pem(key_pair_id,
+pem_key)` is the live constructor — it binds the seam to `lambda p:
+crypto.rsa_sha1_sign(pem, p)`, so callers holding the CloudFront key-pair private
+key need no seam of their own. The injected-seam `cloudfront_signer` stays for
+callers with a custom signer / for the pinned stub test. `tests/
+cloudfront_signing.main.zap` now also exercises the live path end to end (a
+throwaway test key; asserts a stable, non-empty signature rather than pinning RSA
+bytes, since the stdlib-only Python oracle has no RSA).
+
 **Method params are explicit (no defaults).** The optional custom-policy
 conditions are plain parameters (0 / "" omit them), not defaulted method args:
 defaulted parameters on struct METHODS miscompiled before zaplang-io/zap#481, so

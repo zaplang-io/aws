@@ -1307,6 +1307,11 @@ def cloudfront_signing():
     out.append("CloudFront-Policy=" + cf_b64(xcpol))
     out.append("CloudFront-Signature=" + cf_sign(xcpol))
     out.append("CloudFront-Key-Pair-Id=" + CF_KEY_PAIR_ID)
+    # The live-signer section (crypto.rsa_sha1_sign, zap#628/#629) asserts a
+    # stable, non-empty signature in-toolchain; the real RSA bytes are not pinned
+    # (no RSA in this stdlib-only oracle), so the section is a fixed token.
+    out.append("== live signer ==")
+    out.append("live signer: ok")
     return "\n".join(out) + "\n"
 
 

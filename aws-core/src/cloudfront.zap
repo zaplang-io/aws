@@ -29,23 +29,24 @@
 # that to a standard `base64.encode` (padded, matches botocore's
 # `base64.b64encode` + `.translate(b'-_~', b'+=/')`).
 #
-# ## The RSA-SHA1 signer SEAM (and a stdlib gap)
-# CloudFront signs `RSA-SHA1(private_key, policy_bytes)`. The Zap crypto stdlib
-# (zaplang-io/zap#105) ships SHA/HMAC/CSPRNG but NO RSA (no key loading, no
-# RSA-PKCS1v1.5 signing) — see the report accompanying this change; a
-# `crypto.rsa_sha1_sign(pem, data) -> bytes` primitive is the language-first
-# follow-up. So the RSA signature is taken as an injected seam — a
-# `fn(bytes) -> bytes` that maps the policy bytes to the raw signature bytes —
-# exactly as aws.paginators takes a fetch closure and aws.waiters leaves the poll
-# `operation` unmodeled. Everything else (policy construction, the base64 variant,
-# URL/cookie assembly) is implemented and pinned here; when the crypto primitive
-# lands, the live signer is a one-line adapter (`lambda p: crypto.rsa_sha1_sign(
-# pem, p)`), with no change to this module.
+# ## The RSA-SHA1 signer SEAM + the live PEM constructor
+# CloudFront signs `RSA-SHA1(private_key, policy_bytes)`. The RSA signature is
+# taken as an injected seam — a `fn(bytes) -> bytes` that maps the policy bytes to
+# the raw signature bytes — exactly as aws.paginators takes a fetch closure and
+# aws.waiters leaves the poll `operation` unmodeled. Everything else (policy
+# construction, the base64 variant, URL/cookie assembly) is implemented and pinned
+# here. `cloudfront_signer(key_pair_id, rsa_sha1)` takes any such seam;
+# `cloudfront_signer_pem(key_pair_id, pem_key)` is the LIVE constructor, backed by
+# the stdlib primitive `crypto.rsa_sha1_sign` over a PKCS#1 or PKCS#8 PEM. (RSA
+# was originally a gap in the crypto module #105, which shipped SHA/HMAC/CSPRNG
+# only; filed as zaplang-io/zap#628 and added in #629 — so callers that hold the
+# CloudFront key-pair private key need no seam of their own.)
 #
 # Depends on aws.core (bundled ahead of this file).
 
 import core
 import base64
+import crypto
 
 # ---------------------------------------------------------------------------
 # The CloudFront base64 variant
@@ -223,3 +224,15 @@ struct CloudFrontSigner:
 # Construct a signer from the trusted key-pair id and the RSA-SHA1 seam.
 def cloudfront_signer(str key_pair_id, fn(bytes) -> bytes rsa_sha1) -> CloudFrontSigner:
     return CloudFrontSigner(key_pair_id=key_pair_id, rsa_sha1=rsa_sha1)
+
+# The LIVE constructor: a signer backed by the stdlib RSA-SHA1 primitive
+# (zaplang-io/zap#628, added in #629) over a CloudFront key-pair private key.
+# `pem_key` is the PEM private key (PKCS#1 `BEGIN RSA PRIVATE KEY` or PKCS#8
+# `BEGIN PRIVATE KEY`). The injected seam calls `crypto.rsa_sha1_sign(pem, policy)`
+# per policy and returns the raw signature bytes; `sign_policy` then applies the
+# CloudFront base64 variant. `pem_key` is bound to a local before the lambda
+# captures it (the always-valid closure form).
+def cloudfront_signer_pem(str key_pair_id, str pem_key) -> CloudFrontSigner:
+    auto pem = pem_key
+    fn(bytes) -> bytes rsa = lambda p: crypto.rsa_sha1_sign(pem, p)
+    return cloudfront_signer(key_pair_id, rsa)

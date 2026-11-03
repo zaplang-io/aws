@@ -33,6 +33,12 @@ def show_cookie(dict[str, str] c, str key) -> str:
     Optional[str] v = c.get(key)
     return key + "=" + v.unwrap_or("")
 
+# A throwaway RSA test key (PKCS#8 PEM) for the live-signer path — NOT a real
+# CloudFront key; generated solely to exercise crypto.rsa_sha1_sign end to end.
+def test_pem() -> str:
+    return "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCK+/gHCnV77KS7\n8EGEeKTcJ3Bf0KTFzvhLC+4VG1023Spwo/NKo6I6utd29eA7PIYbkhxEtXHtzofL\nLaJnNrFlkCeD20c0gEsT1R3ZLP+To4f4bWXAOVAnAa3OfPz2F28TlrVvNcIZ9/4A\nCqCCjh60XYvvBVvJDhSpL41PmWKc02UWtkwV4Do4Fv1RMkpkPDL7tYj8yTiN4PKH\nyVxDzpNNR97ULMSbFFsNDOAOJZwOGSlkdCY7Ei/VRAmJKcQXI+nWO6L+cSpm2l1r\n+gLVz4lkEuQCcFZyI0fuTn+CycuwFXq2iIZ9LGticblomPQAMn5GtOoARRiaTbXO\nGDfDBzFfAgMBAAECggEADPPBYAqZ+0QI8BjKSkmh94BXaR59FJAetIO2mtHzhGbl\nCx1EUYrhVf7OkKAGVw7jYpNhvgd4yBQstIMatOq0aoYeIJwhTSO9m2oLf49BfCVL\nyRuM1Xah4Ri3dVxRiK+TYuxzGRuV7KyfR6q13aTX+LAVF9/Ud26v/zpWvXnKZlnr\n0Swt10WDvtzVqIyjAduU7uPEWR/tJ3p6wUHoObk7/YgpmN1++LxcGARDCvONdujw\nSTJDINpMMyXZjq0XcKQt89pMBXw9EhAh+mPSYSyQ4TafQ2PxBqynpfaBOmcNv7H2\n2oGmCnnKp8/n22ywLVJFOhxNlZb6FMRJxDEyngfhaQKBgQDBbCJ3wXQiR2TAHZOu\nuk2KwX/FxP/vRXaVFqUJjrtrpLC6HuAsmFRivKnmHm6av2zuJ0a+TUCFqcXMSBZf\nAy5i2Kw/uBlUlSgtBpJZLhwnrFzErPYXfHAbkloI7kvEOXXp26vl//ftYf+v9vg6\nRQujqLHfumQwgVTIw28cDfFwyQKBgQC38xd8aej7BgcoyydANDqzcObN7pGsZX/W\nRmGQBkRlmUjnAdVUXr2r+EPUmf5JRzHkbQsFgZMqj1WNL7IKck5n0ybltFxheDKT\nNhyJ3LnwcyMlY+NPoykMLxlHMsELxS9wee6F3g7oxw9xsfzJ/nMYuGWDSbtyo71c\nxMnk71kM5wKBgElk4t9WRN8NACn2DyfqAap5Kia9TfBZB1ojMZSi2HNMFtNJC/9f\n/gVJWZ68RXPq10a3GJz1a1pMxYVyhSqgZmWTmijDjrkNsCUFrVqxqHVVbg4jI25e\nBZwwuIFTCuT2eMu4U03/BvDIkuEOcbqKoJQFWxlt/L57FNTpc6vNjqQhAoGABs0H\nBkOIKJe9dgWkytvje7Tl46E5Y41RH6P0gXWp27PCHUBVGcxy6MPCBj83RpBKSO67\nJJX40e8As7qas4YsXexRmNaFP9lIzWaHwZUWjsxC9WPvCIe4wcmP/rDisEO3EEqB\nxhNCq9qIOKTi+rjcmoJexm7YblGdc6uW507uFOsCgYEAsliiFMskj69RXNXsRmnn\n2Ml+72osao27v42kzKwjaz/1BLMZ4zGMcoZcix5OOhZb5DDIJ84lD3LEYXWLLw9B\nddvEWjgvg52oa3aGwqY8ed9EFWIB0V9uef6jh8/kcA1NnLfLFrz6NO8HLA6FrCqE\nFCHCjaT8b0sm0MMin/qTYAM=\n-----END PRIVATE KEY-----\n"
+
+
 def main():
     fn(bytes) -> bytes signer_fn = stub_rsa_sha1
     auto signer = cloudfront.cloudfront_signer("APKAEXAMPLE123456", signer_fn)
@@ -74,3 +80,17 @@ def main():
     print(show_cookie(xc, "CloudFront-Policy"))
     print(show_cookie(xc, "CloudFront-Signature"))
     print(show_cookie(xc, "CloudFront-Key-Pair-Id"))
+
+    # Live path: the stdlib RSA-SHA1 primitive (zap#628/#629) wired through
+    # cloudfront_signer_pem. Exercises crypto.rsa_sha1_sign end to end; the
+    # signature is deterministic (PKCS#1 v1.5), so assert it is stable and
+    # non-empty rather than pinning RSA bytes (no RSA in the Python oracle).
+    print("== live signer ==")
+    auto live = cloudfront.cloudfront_signer_pem("APKALIVEKEY000001", test_pem())
+    auto pol = cloudfront.canned_policy(url, expires)
+    auto s1 = live.sign_policy(pol)
+    auto s2 = live.sign_policy(pol)
+    if len(s1) > 0 and s1 == s2:
+        print("live signer: ok")
+    else:
+        print("live signer: FAILED")
