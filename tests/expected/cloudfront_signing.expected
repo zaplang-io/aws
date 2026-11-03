@@ -1,0 +1,22 @@
+== canned policy ==
+{"Statement":[{"Resource":"https://d111111abcdef8.cloudfront.net/private/content.jpg","Condition":{"DateLessThan":{"AWS:EpochTime":1700000000}}}]}
+== custom policy ==
+{"Statement":[{"Resource":"https://d111111abcdef8.cloudfront.net/private/*","Condition":{"DateLessThan":{"AWS:EpochTime":1700000000},"DateGreaterThan":{"AWS:EpochTime":1699990000},"IpAddress":{"AWS:SourceIp":"203.0.113.0/24"}}}]}
+== cloudfront-base64 ==
+gt=Pj4-
+qm=Pz8~
+pad=YQ__
+== canned url ==
+https://d111111abcdef8.cloudfront.net/private/content.jpg?Expires=1700000000&Signature=BkBIDHHY-r-vtQSNV2qWzfNnc-Y_&Key-Pair-Id=APKAEXAMPLE123456
+== custom url ==
+https://d111111abcdef8.cloudfront.net/private/content.jpg?Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly9kMTExMTExYWJjZGVmOC5jbG91ZGZyb250Lm5ldC9wcml2YXRlL2NvbnRlbnQuanBnIiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzAwMDAwMDAwfSwiRGF0ZUdyZWF0ZXJUaGFuIjp7IkFXUzpFcG9jaFRpbWUiOjE2OTk5OTAwMDB9LCJJcEFkZHJlc3MiOnsiQVdTOlNvdXJjZUlwIjoiMjAzLjAuMTEzLjAvMjQifX19XX0_&Signature=wneSMwSSXdj1ZxRZRQY-t2Kf4F0_&Key-Pair-Id=APKAEXAMPLE123456
+== canned cookies ==
+CloudFront-Expires=1700000000
+CloudFront-Signature=fdczoyeAnbsmgeJFd64ahREv6DI_
+CloudFront-Key-Pair-Id=APKAEXAMPLE123456
+== custom cookies ==
+CloudFront-Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly9kMTExMTExYWJjZGVmOC5jbG91ZGZyb250Lm5ldC9wcml2YXRlLyoiLCJDb25kaXRpb24iOnsiRGF0ZUxlc3NUaGFuIjp7IkFXUzpFcG9jaFRpbWUiOjE3MDAwMDAwMDB9LCJEYXRlR3JlYXRlclRoYW4iOnsiQVdTOkVwb2NoVGltZSI6MTY5OTk5MDAwMH0sIklwQWRkcmVzcyI6eyJBV1M6U291cmNlSXAiOiIyMDMuMC4xMTMuMC8yNCJ9fX1dfQ__
+CloudFront-Signature=8yaaPkopjW6kterlI8Ak1pgzeBo_
+CloudFront-Key-Pair-Id=APKAEXAMPLE123456
+== live signer ==
+live signer: ok

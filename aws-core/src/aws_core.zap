@@ -24,17 +24,24 @@
 #   import aws_core.batch_writer # buffered DynamoDB BatchWriteItem writer (#435)
 #   import aws_core.transfer    # S3 managed multipart transfer (#432/#438)
 #   import aws_core.presign     # S3 presigned URL + presigned POST (#432/#439)
+#   import aws_core.cloudfront  # CloudFront signed URLs & cookies (#432/#440)
+#   import aws_core.ec2         # EC2 resource layer + filter collections (#432/#441)
 #
-# `conditions`, `marshal`, `batch_writer`, `transfer` and `presign` are the
-# hand-written ERGONOMICS modules (epic #432): boto3 resource-layer conveniences
-# that ride on top of the generated clients, not derivable from the models (D-0009,
-# D-0010, D-0013, D-0014). `marshal` turns native Zap values into the DynamoDB
+# `conditions`, `marshal`, `batch_writer`, `transfer`, `presign`, `cloudfront`
+# and `ec2` are the hand-written ERGONOMICS modules (epic #432): boto3
+# resource-layer conveniences that ride on top of the generated clients, not
+# derivable from the models (D-0009, D-0010, D-0013, D-0014, D-0015, D-0016).
+# `marshal` turns native Zap values into the DynamoDB
 # AttributeValue wire shape and back (boto3's TypeSerializer / TypeDeserializer),
 # and a condition's `ExpressionAttributeValues` flow through it; `transfer`
 # orchestrates S3 multipart upload/download/copy over the generated S3 client and
 # the aws-core streaming signer (#358); `presign` mints S3 presigned URLs and POST
-# policies over the aws-core query-parameter signer (#359). They are shipping
-# surface, unlike the parked s3 / dynamodb oracle fixtures below.
+# policies over the aws-core query-parameter signer (#359). `cloudfront` mints
+# CloudFront signed URLs / signed cookies for private content (RSA-SHA1 over a
+# policy document — not SigV4); `ec2` is the boto3 resource/collection layer over
+# the generated EC2 client, reusing the paginator engine (#436) for lazy, filtered
+# `Describe*` walks. They are shipping surface, unlike the parked s3 / dynamodb
+# oracle fixtures below.
 #
 # Zap v1 has no re-export form (D-0081 §3), so this root module exposes only the
 # package version; consumers import the submodule they need. The hand-written
