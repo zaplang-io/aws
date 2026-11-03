@@ -185,25 +185,28 @@ def plan_parts(int64 total, TransferConfig cfg) -> list[PartRange]:
         number = number + 1
     return out
 
-# Group `parts` into dispatch WAVES of at most `max_concurrency` part NUMBERS,
-# in ascending order — the structural model of boto3's bounded part concurrency
-# (a live adapter may run one wave's UploadParts concurrently; the parts in a wave
-# are independent). Pure and exposed so the bound is asserted directly. A
-# `max_concurrency` of 0 or less is treated as 1 (sequential).
-def plan_waves(list[PartRange] parts, int64 max_concurrency) -> list[list[int64]]:
+# Plan the dispatch WAVES for `part_count` parts bounded at `max_concurrency`:
+# the ordered list of wave SIZES (e.g. 5 parts at width 2 -> [2, 2, 1]). This is
+# the structural model of boto3's bounded part concurrency — the parts are
+# consumed in ascending order, at most `max_concurrency` per wave, and a live
+# adapter may run one wave's UploadParts concurrently (the parts in a wave are
+# independent). Returned as wave sizes (a flat `list[int64]`) rather than nested
+# part-number lists so the shape stays within the toolchain's proven value kinds.
+# Pure and exposed so the bound is asserted directly. A `max_concurrency` of 0 or
+# less is treated as 1 (sequential).
+def plan_waves(int64 part_count, int64 max_concurrency) -> list[int64]:
     auto width = max_concurrency
     if width < 1:
         width = 1
-    list[list[int64]] waves = []
-    list[int64] cur = []
-    for p in parts:
-        cur.append(p.number)
-        if len(cur) >= width:
-            waves.append(cur)
-            cur = []
-    if len(cur) > 0:
-        waves.append(cur)
-    return waves
+    list[int64] sizes = []
+    auto remaining = part_count
+    while remaining > 0:
+        auto take = width
+        if take > remaining:
+            take = remaining
+        sizes.append(take)
+        remaining = remaining - take
+    return sizes
 
 # The HTTP Range header value for a byte window: "bytes=<first>-<last>"
 # (inclusive, as RFC 7233 / S3 expect). Exposed so the ranged-GET and
@@ -358,15 +361,19 @@ def _multipart_upload(TransferManager tm, str bucket, str key, str body) -> str:
     auto parts = plan_parts(len(body), tm.config)
     fn(str, str, str, int64, str) -> str up = tm.client.upload_part
     list[CompletedPart] done = []
+    auto idx = 0
     try:
         # Dispatch in bounded waves of max_concurrency (a live adapter may run a
         # wave's UploadParts concurrently; ordered here for a testable trace).
-        for wave in plan_waves(parts, tm.config.max_concurrency):
-            for number in wave:
-                auto p = parts[number - 1]
+        for wave_size in plan_waves(len(parts), tm.config.max_concurrency):
+            auto j = 0
+            while j < wave_size:
+                auto p = parts[idx]
                 auto chunk = body[p.offset:p.offset + p.length]
                 auto etag = up(bucket, key, upload_id, p.number, chunk)
                 done.append(CompletedPart(number=p.number, etag=etag))
+                idx = idx + 1
+                j = j + 1
     except Exception as e:
         _abort(tm, bucket, key, upload_id)
         raise "upload aborted (multipart upload " + upload_id + "): " + e

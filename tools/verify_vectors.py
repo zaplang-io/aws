@@ -579,19 +579,18 @@ def _t_plan_parts(total, chunk, min_chunk, max_parts):
     return out
 
 
-def _t_plan_waves(parts, width):
+def _t_plan_waves(part_count, width):
+    """Wave SIZES for `part_count` parts bounded at `width` (e.g. 5,2 -> [2,2,1])
+    — mirrors aws.transfer.plan_waves (flat sizes, no nested lists)."""
     if width < 1:
         width = 1
-    waves = []
-    cur = []
-    for p in parts:
-        cur.append(p[0])
-        if len(cur) >= width:
-            waves.append(cur)
-            cur = []
-    if cur:
-        waves.append(cur)
-    return waves
+    sizes = []
+    remaining = part_count
+    while remaining > 0:
+        take = min(width, remaining)
+        sizes.append(take)
+        remaining -= take
+    return sizes
 
 
 def _t_range(off, length):
@@ -631,8 +630,12 @@ def transfer():
 
     # waves — bounded concurrency grouping (chunk 4 -> 5 parts, width 2).
     out.append("### waves ###")
-    for wave in _t_plan_waves(_t_plan_parts(20, 4, mn, mxp), 2):
-        out.append("wave " + ",".join(str(x) for x in wave))
+    wparts = _t_plan_parts(20, 4, mn, mxp)
+    widx = 0
+    for wsize in _t_plan_waves(len(wparts), 2):
+        grp = wparts[widx:widx + wsize]
+        widx += wsize
+        out.append("wave " + ",".join(str(p[0]) for p in grp))
 
     # upload.abort — part 2 fails -> Abort + raise.
     out.append("### upload.abort ###")

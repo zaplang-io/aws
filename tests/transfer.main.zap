@@ -109,16 +109,6 @@ def dump(Log lg):
     for line in lg.lines:
         print(line)
 
-def _join_nums(list[int64] nums) -> str:
-    auto s = ""
-    auto first = True
-    for n in nums:
-        if not first:
-            s = s + ","
-        s = s + str(n)
-        first = False
-    return s
-
 def main():
     # A small config so multipart is exercised without 8 MiB bodies: 10-byte
     # threshold, 8-byte parts, 1-byte part floor, 10-way concurrency, 10-byte
@@ -144,9 +134,19 @@ def main():
 
     # --- waves (bounded concurrency) -----------------------------------
     auto cfgw = transfer.transfer_config_with(10, 4, 1, 2, 10000, 10)
+    auto wparts = transfer.plan_parts(20, cfgw)
     print("### waves ###")
-    for wave in transfer.plan_waves(transfer.plan_parts(20, cfgw), 2):
-        print("wave " + _join_nums(wave))
+    auto widx = 0
+    for wsize in transfer.plan_waves(len(wparts), 2):
+        auto s = ""
+        auto wj = 0
+        while wj < wsize:
+            if wj > 0:
+                s = s + ","
+            s = s + str(wparts[widx].number)
+            widx = widx + 1
+            wj = wj + 1
+        print("wave " + s)
 
     # --- upload.abort --------------------------------------------------
     auto lg3 = new_log()
