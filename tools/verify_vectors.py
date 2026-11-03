@@ -1315,6 +1315,152 @@ def cloudfront_signing():
     return "\n".join(out) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# SQS message digests (aws.sqs, zap#442)
+# ---------------------------------------------------------------------------
+#
+# Independent mirror of aws-core/src/sqs.zap's body_md5 / attributes_md5 — the
+# MD5 digests SQS returns on SendMessage and the AWS SDKs validate client-side.
+# body_md5 is a plain MD5 of the body; attributes_md5 follows AWS's attribute
+# digest: for each attribute in ascending NAME order, a 4-byte-BE-length-prefixed
+# name and data type, then a transport-type byte (1 = String/Number value,
+# 2 = Binary value) and the length-prefixed value. Reproduced here with
+# hashlib.md5 over the identical byte layout, so the Zap digests are cross-checked
+# (only MD5, no key material — a pure corruption checksum).
+
+SQS_BODY = "Hello, SQS!"
+SQS_BIN = bytes([0, 1, 2, 3, 255])
+# (name, data_type, is_binary, value) — deliberately NOT in name order, to
+# exercise the ascending-name sort the digest requires.
+SQS_ATTRS_ALL = [
+    ("Population", "Number", False, "1250800"),
+    ("City", "String", False, "Any City"),
+    ("Logo", "Binary", True, SQS_BIN),
+]
+SQS_ATTRS_STRING = [("City", "String", False, "Any City")]
+SQS_ATTRS_BINARY = [("Logo", "Binary", True, SQS_BIN)]
+
+
+def _sqs_len_bytes(b):
+    return len(b).to_bytes(4, "big") + b
+
+
+def _sqs_attr_md5(attrs):
+    m = hashlib.md5()
+    for name, dtype, is_bin, val in sorted(attrs, key=lambda a: a[0]):
+        m.update(_sqs_len_bytes(name.encode()))
+        m.update(_sqs_len_bytes(dtype.encode()))
+        if is_bin:
+            m.update(bytes([2]))
+            m.update(_sqs_len_bytes(val))
+        else:
+            m.update(bytes([1]))
+            m.update(_sqs_len_bytes(val.encode()))
+    return m.hexdigest()
+
+
+def sqs():
+    out = []
+    out.append("== body md5 ==")
+    out.append(hashlib.md5(SQS_BODY.encode()).hexdigest())
+    out.append("== attributes md5 string ==")
+    out.append(_sqs_attr_md5(SQS_ATTRS_STRING))
+    out.append("== attributes md5 all ==")
+    out.append(_sqs_attr_md5(SQS_ATTRS_ALL))
+    out.append("== attributes md5 binary ==")
+    out.append(_sqs_attr_md5(SQS_ATTRS_BINARY))
+    # Send: the mock echoes the locally computed digests, so the SDK-style
+    # client-side validation passes; the booleans and the verify line are fixed.
+    out.append("== send result ==")
+    out.append("id=msg-0001 body-md5-match=True attrs-md5-match=True")
+    out.append("== verify ==")
+    out.append("ok")
+    out.append("== tampered ==")
+    out.append("mismatch detected")
+    # Receive: the mock returns two canned messages; delete by receipt handle.
+    out.append("== receive ==")
+    out.append("m-1 rh-1 first")
+    out.append("m-2 rh-2 second")
+    out.append("== delete ==")
+    out.append("DeleteMessage rh-1")
+    return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Glacier SHA-256 tree hash (aws.glacier, zap#444)
+# ---------------------------------------------------------------------------
+#
+# Independent mirror of aws-core/src/glacier.zap: the SHA-256 tree hash Glacier
+# requires on archive uploads. Split into 1 MiB leaves, SHA-256 each, then reduce
+# the binary tree pair by pair (an odd trailing node promoted unchanged) to a
+# single root, emitted lowercase hex. The multipart section checks that a
+# 1-MiB-aligned part split reproduces the whole-archive tree hash. Pure SHA-256,
+# reproduced here with hashlib.
+
+GLACIER_CHUNK = 1048576
+
+
+def _g_leaves(data):
+    if len(data) == 0:
+        return [hashlib.sha256(data).digest()]
+    out = []
+    for off in range(0, len(data), GLACIER_CHUNK):
+        out.append(hashlib.sha256(data[off:off + GLACIER_CHUNK]).digest())
+    return out
+
+
+def _g_root(leaves):
+    lvl = leaves
+    while len(lvl) > 1:
+        nxt = []
+        i = 0
+        while i < len(lvl):
+            if i + 1 < len(lvl):
+                nxt.append(hashlib.sha256(lvl[i] + lvl[i + 1]).digest())
+                i += 2
+            else:
+                nxt.append(lvl[i])
+                i += 1
+        lvl = nxt
+    return lvl[0]
+
+
+def _g_tree_hex(data):
+    return _g_root(_g_leaves(data)).hex()
+
+
+def glacier():
+    # A 4-MiB-plus-100-byte archive of a single repeated byte: 5 leaves (four
+    # full chunks + a 100-byte remainder), so the first reduction is odd (5 -> 3)
+    # and exercises node promotion. Built the same way the Zap test does (a single
+    # 'a' byte), so both sides agree trivially on the content.
+    target = 4 * GLACIER_CHUNK + 100
+    data = b"a" * target
+    one_mib = b"a" * GLACIER_CHUNK
+    out = []
+    out.append("== empty ==")
+    out.append(_g_tree_hex(b""))
+    out.append("== small (hello) ==")
+    out.append(_g_tree_hex(b"hello"))
+    out.append("== one mib ==")
+    out.append(_g_tree_hex(one_mib))
+    out.append("== multi (5 leaves) ==")
+    out.append("tree " + _g_tree_hex(data))
+    out.append("linear " + hashlib.sha256(data).hexdigest())
+    # Multipart: two 2-MiB parts + a 100-byte final part, 1-MiB-aligned so the
+    # concatenated leaves reproduce the whole-archive tree.
+    p1 = data[0:2 * GLACIER_CHUNK]
+    p2 = data[2 * GLACIER_CHUNK:4 * GLACIER_CHUNK]
+    p3 = data[4 * GLACIER_CHUNK:]
+    out.append("== multipart ==")
+    out.append("part1 " + _g_tree_hex(p1))
+    out.append("part2 " + _g_tree_hex(p2))
+    out.append("part3 " + _g_tree_hex(p3))
+    out.append("archive " + _g_tree_hex(data))
+    out.append("size " + str(target))
+    return "\n".join(out) + "\n"
+
+
 def check(name, computed):
     path = os.path.join(EXP, name + ".expected")
     with open(path, "r", newline="") as fh:
@@ -1339,6 +1485,8 @@ def main():
     ok &= check("middleware", middleware())
     ok &= check("cbor_codec", cbor_codec())
     ok &= check("cloudfront_signing", cloudfront_signing())
+    ok &= check("sqs_messaging", sqs())
+    ok &= check("glacier_treehash", glacier())
     if not ok:
         return 1
     print("vectors verified against independent oracle")

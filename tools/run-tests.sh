@@ -74,6 +74,10 @@ run_case marshal
 run_case batch_writer
 run_case cloudfront_signing
 run_case ec2_resources
+run_case sqs_messaging
+run_case sns_publish
+run_case iam_resources
+run_case glacier_treehash
 
 if [[ $fail -ne 0 ]]; then
     echo "TESTS FAILED" >&2
